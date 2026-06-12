@@ -116,9 +116,6 @@ export interface Metrics {
   apiSuccessCount: number;
 }
 
-export type PutawayStrategyId = 'nearest' | 'category' | 'capacity' | 'fifo';
-export type PickStrategyId = 's_shape' | 'return' | 'midpoint' | 'largest_gap';
-
 // === 可配置场景（新）===
 
 /** 节点类型：
@@ -129,21 +126,74 @@ export type PickStrategyId = 's_shape' | 'return' | 'midpoint' | 'largest_gap';
 export type NodeKind = 'simulate' | 'api' | 'transform';
 
 export type SimulateSubKind =
-  | 'inbound'     // 生成入库单
-  | 'allocate'    // 上架分配
-  | 'putaway'     // 上架校验
-  | 'pick'        // 拣选路径
-  | 'replenish'   // 补货扫描
-  | 'outbound'    // 生成出库单
-  | 'inventory'   // 初始库存生成
-  | 'custom';     // 自定义脚本
+  // ===== 入库流程 =====
+  | 'inbound'           // 生成入库申请单
+  | 'allocate'          // 上架分配（入货位）
+  | 'putaway'           // 上架实际落地
+  // ===== 出库流程 =====
+  | 'outbound'          // 生成出库订单
+  | 'outbound-allocate' // 出库分配（订单 → 库位映射）
+  | 'cartonize'         // 组盘：按目的/容器/批次合并订单行 → 容器
+  | 'picklist'          // 拣选单生成：合并多订单 → 一张拣选单
+  | 'pick'              // 拣选路径生成 + 下架
+  | 'down'              // 下架（实际从库位移除）
+  | 'pack'              // 打包
+  | 'ship'              // 发货/出库交接
+  // ===== 库存辅助 =====
+  | 'replenish'         // 补货扫描
+  | 'inventory'         // 初始库存生成
+  | 'custom';           // 自定义脚本
+
+export type PutawayStrategyId =
+  | 'nearest'           // 最近库位
+  | 'category'          // 按品类集中
+  | 'capacity'          // 按容量分散
+  | 'fifo'              // 先进先出
+  | 'abc';              // ABC 分类
+
+export type OutboundAllocateStrategyId =
+  | 'nearest'           // 最近库位
+  | 'fifo'              // 先进先出
+  | 'lifo'              // 后进先出
+  | 'category'          // 同品类集中
+  | 'oldest-batch'      // 最早批次优先
+  | 'multi-location';   // 多库位拆分
+
+export type CartonizeStrategyId =
+  | 'by-customer'       // 按客户分托盘
+  | 'by-zone'           // 按区域分托盘
+  | 'by-batch'          // 按批次分托盘
+  | 'single'            // 单托盘
+  | 'container';        // 按容器分托盘
+
+export type PickListStrategyId =
+  | 'one-per-order'     // 一单一拣选
+  | 'batch-by-zone'     // 按区域合批
+  | 'batch-by-customer' // 按客户合批
+  | 'wave';             // 波次合批
+
+export type DownStrategyId =
+  | 'nearest'           // 最近库位
+  | 'fifo'              // 先进先出
+  | 'lifo'              // 后进先出
+  | 'oldest-batch'      // 最早批次
+  | 'category'          // 同品类集中
+  | 'max-pick';         // 同库位最大拣选量
+
+export type PickStrategyId = 's_shape' | 'return' | 'midpoint' | 'largest_gap';
 
 export interface SimulateConfig {
   subKind: SimulateSubKind;
   putawayStrategy?: PutawayStrategyId;
+  outboundAllocateStrategy?: OutboundAllocateStrategyId;
+  cartonizeStrategy?: CartonizeStrategyId;
+  pickListStrategy?: PickListStrategyId;
+  downStrategy?: DownStrategyId;
   pickStrategy?: PickStrategyId;
   replenishThreshold?: number;
   count?: number;          // 数量（如入库单数 / 出库单数）
+  /** 容器/托盘容量上限（组盘/拣选单拆分用） */
+  containerCapacity?: number;
   customScript?: string;   // kind=custom 时执行的脚本片段
 }
 
@@ -245,6 +295,100 @@ export interface RuntimeContext {
   assignments: Assignment[];
   picks: { orderId: string; path: Location[]; distance: number; duration: number; startedAt?: number; completedAt?: number; steps?: { locationId: string; pickAt: number; skuId: string; qty: number; batch?: string }[] }[];
   replenish: ReplenishSuggestion[];
+  /** 出库分配结果（订单 → 库位） */
+  outboundAllocations: OutboundAllocation[];
+  /** 组盘单（容器） */
+  cartonizations: Cartonization[];
+  /** 拣选单 */
+  pickLists: PickList[];
+  /** 打包记录 */
+  packs: PackRecord[];
+  /** 发货记录 */
+  shipments: ShipmentRecord[];
+}
+
+/** 出库分配：出库订单行 → 库位 */
+export interface OutboundAllocation {
+  orderLineId: string;
+  orderId: string;
+  skuId: string;
+  qty: number;              // 需要拣的数量
+  locationId: string;       // 拣选库位
+  batch?: string;
+  /** 是否被多库位拆分 */
+  splitIndex?: number;
+  splitCount?: number;
+  /** 分配时间 */
+  createdAt?: number;
+  /** 下架时间 */
+  downAt?: number;
+  strategy?: OutboundAllocateStrategyId;
+}
+
+/** 组盘单：把多张出库订单行按规则合并成一个容器（托盘/箱） */
+export interface Cartonization {
+  id: string;
+  strategy: CartonizeStrategyId;
+  containerNo: string;          // 容器/托盘号
+  sourceOrderIds: string[];     // 关联的出库单
+  items: CartonizationItem[];   // 容器内的明细
+  capacityUsed: number;         // 0~1
+  createdAt: number;
+}
+
+export interface CartonizationItem {
+  skuId: string;
+  qty: number;
+  batch?: string;
+  sourceOrderId: string;
+  sourceLineId: string;
+  locationId?: string;          // 拣选库位（出库分配后才有）
+  pickAt?: number;              // 拣选时间
+}
+
+/** 拣选单：把多张订单合并成一张拣选任务（一次拣完多个订单） */
+export interface PickList {
+  id: string;
+  strategy: PickListStrategyId;
+  pickerId?: string;            // 拣选员/工位
+  sourceOrderIds: string[];     // 关联的出库单
+  cartonIds: string[];          // 关联的容器
+  lines: PickListLine[];        // 拣选明细
+  totalDistance: number;        // 行走总距离
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+}
+
+export interface PickListLine {
+  locationId: string;
+  skuId: string;
+  qty: number;
+  batch?: string;
+  sourceOrderId: string;
+  containerNo?: string;
+  pickAt?: number;
+}
+
+/** 打包记录 */
+export interface PackRecord {
+  id: string;
+  cartonId: string;
+  packerId?: string;
+  weight?: number;
+  startedAt?: number;
+  completedAt?: number;
+  status: 'pending' | 'packing' | 'packed' | 'shipped';
+}
+
+/** 发货记录 */
+export interface ShipmentRecord {
+  id: string;
+  cartonIds: string[];
+  carrier?: string;
+  destination?: string;
+  shippedAt?: number;
+  status: 'pending' | 'shipped';
 }
 
 export interface SimulationRequest {

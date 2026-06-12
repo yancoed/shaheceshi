@@ -1,5 +1,6 @@
 import type {
   Assignment, Location, Order, OrderLine, ReplenishSuggestion, Scenario, ScenarioNode, DataTemplate, TraceEvent, Metrics, Inventory, SKU, SimulateConfig, ApiConfig, RuntimeContext,
+  OutboundAllocation, Cartonization, PickList, PackRecord, ShipmentRecord,
 } from './types';
 import { makeRng, manhattan, pickOne, randInt, shortId, pad } from './utils';
 import { buildLocations, buildSKUs, buildInitialInventory, buildInboundOrders, buildOutboundOrders, GRID_ROWS, GRID_COLS } from './mock';
@@ -609,6 +610,344 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
     const script = node.simulate?.customScript ?? '';
     return { summary: `自定义脚本已「执行」：${script.slice(0, 60) || '(空)'}`, payload: { script: script.slice(0, 200) } };
   },
+
+  // ============================================================
+  // ============ 出库流程新节点（场景 2/3 用） =================
+  // ============================================================
+
+  /**
+   * 出库分配：订单行 → 库位（多策略）
+   * - nearest        : 距离 EXIT 最近的库位
+   * - fifo           : 先进先出（putawayAt 最久远的）
+   * - lifo           : 后进先出（putawayAt 最新的）
+   * - category       : 同 SKU 集中（聚合拣选）
+   * - oldest-batch   : 最早批次优先
+   * - multi-location : 拆分成多库位（同一行多格）
+   */
+  'outbound-allocate': async (node, ctx) => {
+    if (ctx.pickOrders.length === 0) {
+      return { summary: '⚠ 未先执行「生成出库单」', payload: {} };
+    }
+    const cfg = node.simulate!;
+    const strategy = cfg.outboundAllocateStrategy ?? 'fifo';
+    const now = Date.now();
+    const allocations: OutboundAllocation[] = [];
+    let anomalies = 0;
+    // 节点级来源：限定在绑定设备的库位
+    const sourceRes = resolveDeviceIdsToLocationIds(node.sourceDeviceIds, _stage);
+    const sourceLocIds = sourceRes.ids;
+    const invPool = sourceLocIds
+      ? ctx.inventory.filter((i) => sourceLocIds.has(i.locationId))
+      : ctx.inventory;
+    // 索引：按 SKU 分组
+    const invBySku = new Map<string, Inventory[]>();
+    for (const inv of invPool) {
+      if (!invBySku.has(inv.skuId)) invBySku.set(inv.skuId, []);
+      invBySku.get(inv.skuId)!.push(inv);
+    }
+    for (const order of ctx.pickOrders) {
+      for (const line of order.lines) {
+        const candidates = invBySku.get(line.skuId) ?? [];
+        if (candidates.length === 0) { anomalies++; continue; }
+        // 按策略排序候选库位
+        const sorted = [...candidates].sort((a, b) => {
+          const la = _locationById.get(a.locationId)!;
+          const lb = _locationById.get(b.locationId)!;
+          switch (strategy) {
+            case 'nearest':       return manhattan(EXIT, la) - manhattan(EXIT, lb);
+            case 'fifo': {
+              // 旧批次/上架时间最早的优先
+              const ax = (a as any).putawayAt ?? 0;
+              const bx = (b as any).putawayAt ?? 0;
+              return ax - bx;
+            }
+            case 'lifo': {
+              const ax = (a as any).putawayAt ?? 0;
+              const bx = (b as any).putawayAt ?? 0;
+              return bx - ax;
+            }
+            case 'oldest-batch': return (a.batch ?? '').localeCompare(b.batch ?? '');
+            case 'category': {
+              const ca = _skuById.get(a.skuId)?.category ?? '';
+              const cb = _skuById.get(b.skuId)?.category ?? '';
+              return ca.localeCompare(cb) || manhattan(EXIT, la) - manhattan(EXIT, lb);
+            }
+            case 'multi-location': {
+              // 拆分布局：相同行优先，便于一次拣完
+              return la.row - lb.row || la.col - lb.col;
+            }
+            default: return 0;
+          }
+        });
+        // 默认取 1 个库位；multi-location 时可拆
+        const takeCount = strategy === 'multi-location' ? Math.min(sorted.length, 3) : 1;
+        const picked = sorted.slice(0, takeCount);
+        picked.forEach((inv, idx) => {
+          allocations.push({
+            orderLineId: line.id,
+            orderId: order.id,
+            skuId: line.skuId,
+            qty: Math.ceil(line.qty / picked.length),
+            locationId: inv.locationId,
+            batch: inv.batch,
+            splitIndex: idx + 1,
+            splitCount: picked.length,
+            createdAt: now,
+            strategy,
+          });
+        });
+      }
+    }
+    ctx.outboundAllocations = allocations;
+    return {
+      summary: `出库分配完成 · ${allocations.length} 行 · 策略 ${strategy} · 异常 ${anomalies}`,
+      payload: { count: allocations.length, strategy, anomalies },
+    };
+  },
+
+  /**
+   * 组盘（cartonize）：把出库分配结果按策略合并到容器
+   * - by-customer : 按客户分托盘
+   * - by-zone     : 按巷道分托盘
+   * - by-batch    : 按批次分托盘
+   * - single      : 单托盘
+   * - container   : 按容器分托盘
+   */
+  cartonize: async (node, ctx) => {
+    if (!ctx.outboundAllocations || ctx.outboundAllocations.length === 0) {
+      return { summary: '⚠ 未先执行「出库分配」', payload: {} };
+    }
+    const cfg = node.simulate!;
+    const strategy = cfg.cartonizeStrategy ?? 'by-customer';
+    const capacity = cfg.containerCapacity ?? 50;
+    const now = Date.now();
+    const groups = new Map<string, OutboundAllocation[]>();
+    for (const a of ctx.outboundAllocations) {
+      const order = ctx.pickOrders.find((o) => o.id === a.orderId);
+      const line = order?.lines.find((l) => l.id === a.orderLineId);
+      const customer = (line as any)?.customer ?? (order as any)?.customer ?? a.orderId;
+      const zoneId = _locationById.get(a.locationId)?.row.toString() ?? '0';
+      let key: string;
+      switch (strategy) {
+        case 'by-customer':  key = `CUS-${customer}`; break;
+        case 'by-zone':      key = `ZONE-${zoneId}`;  break;
+        case 'by-batch':     key = `BAT-${a.batch ?? 'NONE'}`; break;
+        case 'single':       key = 'SINGLE-1'; break;
+        case 'container':    key = (line as any)?.container ?? `CTN-${a.orderId}`; break;
+        default:             key = 'MISC';
+      }
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(a);
+    }
+    const cartons: Cartonization[] = [];
+    let cartonIdx = 0;
+    for (const [key, items] of groups) {
+      // 按容量拆分
+      let curItems: typeof items = [];
+      let curQty = 0;
+      const flush = () => {
+        if (curItems.length === 0) return;
+        cartonIdx++;
+        const total = curItems.reduce((s, x) => s + x.qty, 0);
+        cartons.push({
+          id: `CTN-${pad(cartonIdx, 5)}`,
+          strategy,
+          containerNo: `PLT-${pad(cartonIdx, 5)}`,
+          sourceOrderIds: [...new Set(curItems.map((x) => x.orderId))],
+          items: curItems.map((a) => ({
+            skuId: a.skuId,
+            qty: a.qty,
+            batch: a.batch,
+            sourceOrderId: a.orderId,
+            sourceLineId: a.orderLineId,
+            locationId: a.locationId,
+          })),
+          capacityUsed: total / capacity,
+          createdAt: now,
+        });
+        curItems = [];
+        curQty = 0;
+      };
+      for (const a of items) {
+        if (curQty + a.qty > capacity && curItems.length > 0) flush();
+        curItems.push(a);
+        curQty += a.qty;
+      }
+      flush();
+    }
+    ctx.cartonizations = cartons;
+    return {
+      summary: `组盘完成 · ${cartons.length} 个容器 · 策略 ${strategy} · 容量 ${capacity}`,
+      payload: { count: cartons.length, strategy, capacity },
+    };
+  },
+
+  /**
+   * 拣选单生成：合并多订单/多容器 → 一张拣选单
+   * - one-per-order     : 一单一拣选单
+   * - batch-by-zone     : 按区域合批
+   * - batch-by-customer : 按客户合批
+   * - wave              : 波次合批（一次合所有）
+   */
+  picklist: async (node, ctx) => {
+    if (!ctx.outboundAllocations || ctx.outboundAllocations.length === 0) {
+      return { summary: '⚠ 未先执行「出库分配」', payload: {} };
+    }
+    const cfg = node.simulate!;
+    const strategy = cfg.pickListStrategy ?? 'batch-by-zone';
+    const now = Date.now();
+    const groups = new Map<string, OutboundAllocation[]>();
+    for (const a of ctx.outboundAllocations) {
+      const order = ctx.pickOrders.find((o) => o.id === a.orderId);
+      const customer = (order as any)?.customer ?? a.orderId;
+      const zoneId = _locationById.get(a.locationId)?.row.toString() ?? '0';
+      let key: string;
+      switch (strategy) {
+        case 'one-per-order':     key = a.orderId; break;
+        case 'batch-by-zone':     key = `ZONE-${zoneId}`; break;
+        case 'batch-by-customer': key = `CUS-${customer}`; break;
+        case 'wave':              key = 'WAVE-1'; break;
+        default:                  key = 'MISC';
+      }
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(a);
+    }
+    const lists: PickList[] = [];
+    let plIdx = 0;
+    for (const [key, items] of groups) {
+      plIdx++;
+      // 按库位排序，便于行走
+      const sortedItems = [...items].sort((a, b) => {
+        const la = _locationById.get(a.locationId)!;
+        const lb = _locationById.get(b.locationId)!;
+        return la.row - lb.row || la.col - lb.col;
+      });
+      // 计算总距离（S 型遍历）
+      let dist = 0;
+      let cur = ENTRY;
+      for (const a of sortedItems) {
+        const l = _locationById.get(a.locationId)!;
+        dist += manhattan(cur, l);
+        cur = l;
+      }
+      dist += manhattan(cur, EXIT);
+      lists.push({
+        id: `PL-${pad(plIdx, 4)}`,
+        strategy,
+        sourceOrderIds: [...new Set(items.map((x) => x.orderId))],
+        cartonIds: (ctx.cartonizations ?? []).filter((c) =>
+          c.items.some((it) => items.some((a) => a.orderId === it.sourceOrderId && a.orderLineId === it.sourceLineId)),
+        ).map((c) => c.id),
+        lines: sortedItems.map((a) => ({
+          locationId: a.locationId,
+          skuId: a.skuId,
+          qty: a.qty,
+          batch: a.batch,
+          sourceOrderId: a.orderId,
+        })),
+        totalDistance: dist,
+        createdAt: now,
+      });
+    }
+    ctx.pickLists = lists;
+    return {
+      summary: `拣选单生成 · ${lists.length} 张 · 策略 ${strategy} · 总行走 ${lists.reduce((s, l) => s + l.totalDistance, 0)} m`,
+      payload: { count: lists.length, strategy, totalDist: lists.reduce((s, l) => s + l.totalDistance, 0) },
+    };
+  },
+
+  /**
+   * 下架（down）：从库位实际移除（不重新计算路径）
+   * 与 pick 区别：pick 生成路径，down 真正执行移除并标记 downAt
+   */
+  down: async (node, ctx) => {
+    if (!ctx.outboundAllocations || ctx.outboundAllocations.length === 0) {
+      return { summary: '⚠ 未先执行「出库分配」', payload: {} };
+    }
+    const cfg = node.simulate!;
+    const strategy = cfg.downStrategy ?? 'fifo';
+    const now = Date.now();
+    const pickByLoc = new Map<string, { orderId: string; qty: number; batch?: string }>();
+    for (const a of ctx.outboundAllocations) {
+      if (!pickByLoc.has(a.locationId)) pickByLoc.set(a.locationId, { orderId: a.orderId, qty: 0, batch: a.batch });
+      pickByLoc.get(a.locationId)!.qty += a.qty;
+    }
+    let downCount = 0;
+    for (const [locId, info] of pickByLoc) {
+      const idx = ctx.inventory.findIndex((i) => i.locationId === locId);
+      if (idx >= 0) {
+        ctx.inventory[idx] = { ...ctx.inventory[idx], qty: Math.max(0, ctx.inventory[idx].qty - info.qty) };
+        if (ctx.inventory[idx].qty === 0) ctx.inventory.splice(idx, 1);
+        downCount++;
+      }
+      // 标记 downAt
+      for (const a of ctx.outboundAllocations) {
+        if (a.locationId === locId && !a.downAt) a.downAt = now;
+      }
+    }
+    return {
+      summary: `下架完成 · ${downCount} 个库位 · 策略 ${strategy}`,
+      payload: { count: downCount, strategy },
+    };
+  },
+
+  /**
+   * 打包（pack）：按容器生成打包记录
+   */
+  pack: async (node, ctx) => {
+    if (!ctx.cartonizations || ctx.cartonizations.length === 0) {
+      return { summary: '⚠ 未先执行「组盘」', payload: {} };
+    }
+    const now = Date.now();
+    const packs: PackRecord[] = ctx.cartonizations.map((c, i) => ({
+      id: `PK-${pad(i + 1, 5)}`,
+      cartonId: c.id,
+      weight: c.items.reduce((s, it) => s + it.qty, 0) * 1.2,
+      startedAt: now,
+      completedAt: now + 60_000,
+      status: 'packed',
+    }));
+    ctx.packs = packs;
+    return {
+      summary: `打包完成 · ${packs.length} 个容器`,
+      payload: { count: packs.length },
+    };
+  },
+
+  /**
+   * 发货（ship）：按客户/目的地生成运单
+   */
+  ship: async (node, ctx) => {
+    if (!ctx.cartonizations || ctx.cartonizations.length === 0) {
+      return { summary: '⚠ 未先执行「组盘」', payload: {} };
+    }
+    const now = Date.now();
+    const groups = new Map<string, string[]>();
+    for (const c of ctx.cartonizations) {
+      const firstOrder = ctx.pickOrders.find((o) => o.id === c.sourceOrderIds[0]);
+      const customer = (firstOrder as any)?.customer ?? 'CUST-DEFAULT';
+      if (!groups.has(customer)) groups.set(customer, []);
+      groups.get(customer)!.push(c.id);
+    }
+    const shipments: ShipmentRecord[] = [];
+    let idx = 0;
+    for (const [customer, cartonIds] of groups) {
+      idx++;
+      shipments.push({
+        id: `SHP-${pad(idx, 4)}`,
+        cartonIds,
+        carrier: '顺丰',
+        destination: customer,
+        shippedAt: now,
+        status: 'shipped',
+      });
+    }
+    ctx.shipments = shipments;
+    return {
+      summary: `发货完成 · ${shipments.length} 运单 · ${ctx.cartonizations.length} 容器`,
+      payload: { count: shipments.length, cartons: ctx.cartonizations.length },
+    };
+  },
 };
 
 const API_EXECUTOR: NodeExecutor = async (node, ctx, apiCalls, tplMap) => {
@@ -774,6 +1113,11 @@ export async function runScenario(
     assignments: [],
     picks: [],
     replenish: [],
+    outboundAllocations: [],
+    cartonizations: [],
+    pickLists: [],
+    packs: [],
+    shipments: [],
   };
 
   // 旧版全局模板兜底：若 inbound 节点未绑模板且给了全局 template，则预填 orders

@@ -330,7 +330,13 @@ const SUBKIND_BINDING: Record<SimulateSubKind, { source: StageDeviceKind[]; targ
   inventory:  { source: [],                  target: ['shelf', 'zone'], sourceLabel: '', targetLabel: '放在哪些库位',  sourceHint: '',                                          targetHint: '只把初始库存生成在选中的库位/区域' },
   allocate:   { source: [],                  target: ['shelf', 'zone'], sourceLabel: '', targetLabel: '分到哪些库位',  sourceHint: '',                                          targetHint: '优先把入库行分配到选中的库位/区域，没选就用全部' },
   putaway:    { source: [],                  target: ['station'],       sourceLabel: '', targetLabel: '经由哪些工位',  sourceHint: '',                                          targetHint: '只让选中的工位执行上架（工位角色需配 putaway）' },
+  'outbound-allocate': { source: ['shelf', 'zone'], target: [], sourceLabel: '从哪些库位分配', targetLabel: '', sourceHint: '只从选中的库位/区域分配出库', targetHint: '' },
+  cartonize:  { source: [],                  target: ['station'],       sourceLabel: '',                  targetLabel: '经由哪些工位',  sourceHint: '',                                          targetHint: '只让选中的工位执行组盘（工位角色需配 pick）' },
+  picklist:   { source: [],                  target: ['station'],       sourceLabel: '',                  targetLabel: '经由哪些工位',  sourceHint: '',                                          targetHint: '只让选中的工位执行拣选（工位角色需配 pick）' },
   pick:       { source: ['shelf'],           target: ['station'],       sourceLabel: '从哪些库位拣',  targetLabel: '经由哪些工位',  sourceHint: '只从选中的库位拣选',                                targetHint: '只让选中的工位执行拣选（工位角色需配 pick）' },
+  down:       { source: ['shelf'],           target: ['station'],       sourceLabel: '从哪些库位下架',  targetLabel: '经由哪些工位',  sourceHint: '只从选中的库位下架',                                targetHint: '只让选中的工位执行下架（工位角色需配 pick）' },
+  pack:       { source: [],                  target: ['station'],       sourceLabel: '',                  targetLabel: '经由哪些工位',  sourceHint: '',                                          targetHint: '只让选中的工位执行打包（工位角色需配 pack）' },
+  ship:       { source: [],                  target: ['dock', 'station'], sourceLabel: '',                targetLabel: '从哪些位置出库', sourceHint: '',                                          targetHint: '只让选中的月台/工位执行发货' },
   replenish:  { source: ['shelf'],           target: ['station'],       sourceLabel: '扫描哪些库位',  targetLabel: '经由哪些工位',  sourceHint: '只扫描选中的库位',                                  targetHint: '只让选中的工位执行补货（工位角色需配 replenish）' },
   custom:     { source: ['dock', 'station', 'shelf', 'zone', 'aisle', 'stack', 'lift', 'pallet', 'tote'], target: ['dock', 'station', 'shelf', 'zone', 'aisle', 'stack', 'lift', 'pallet', 'tote'], sourceLabel: '从哪些设备读', targetLabel: '写到哪些设备', sourceHint: '执行时从这些设备读数据', targetHint: '执行结果写到这些设备' },
 };

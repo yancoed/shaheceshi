@@ -337,6 +337,95 @@ function makeDoubleDeepScenario(scenarioId: string): Scenario {
   };
 }
 
+/**
+ * 场景 3 · 出库全流程（演示用，复用场景 2 舞台）
+ * 出库申请 → 出库分配 → 组盘 → 拣选单 → 下架 → 打包 → 发货
+ */
+function makeOutboundScenario(scenarioId: string): Scenario {
+  const t0 = Date.now();
+  const sid = scenarioId;
+  // 出库工位（出库场景里也用 station）
+  const st1 = `d-${sid}-station-1`;
+  const st2 = `d-${sid}-station-2`;
+  const dock = `d-${sid}-dock-1`;
+  return {
+    id: sid,
+    name: '场景 3 · 出库全流程',
+    description: '出库申请 → 出库分配 → 组盘 → 拣选单 → 下架 → 打包 → 发货（出库分配 6 策略 / 组盘 5 策略 / 拣选单 4 策略 / 下架 6 策略）',
+    builtin: true,
+    createdAt: t0,
+    updatedAt: t0,
+    templateId: undefined,
+    stage: makeDoubleDeepStage(sid),  // 复用场景 2 的舞台（含 12 排 + 3 巷道 + 2 工位 + 1 月台）
+    nodes: [
+      {
+        id: 'n-ob-apply',
+        name: '① 出库申请',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: [],
+        sourceDeviceIds: [dock],
+        simulate: sampleSimulate('outbound', { putawayStrategy: 'fifo' }),
+        templateId: 'tpl-outbound-default',
+      },
+      {
+        id: 'n-ob-allocate',
+        name: '② 出库分配（库位 → 订单）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-apply'],
+        sourceDeviceIds: [`d-${sid}-row-1`, `d-${sid}-row-2`, `d-${sid}-row-3`, `d-${sid}-row-4`, `d-${sid}-row-5`, `d-${sid}-row-6`],  // 限定从 1-6 排分配
+        simulate: sampleSimulate('outbound-allocate', { outboundAllocateStrategy: 'fifo' }),
+      },
+      {
+        id: 'n-ob-cartonize',
+        name: '③ 组盘（按客户分托盘）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-allocate'],
+        targetDeviceIds: [st1, st2],
+        simulate: sampleSimulate('cartonize', { cartonizeStrategy: 'by-customer', containerCapacity: 30 }),
+      },
+      {
+        id: 'n-ob-picklist',
+        name: '④ 拣选单生成（按区域合批）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-cartonize'],
+        targetDeviceIds: [st1, st2],
+        simulate: sampleSimulate('picklist', { pickListStrategy: 'batch-by-zone' }),
+      },
+      {
+        id: 'n-ob-down',
+        name: '⑤ 下架（FIFO 最早批次优先）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-picklist'],
+        sourceDeviceIds: [st1, st2],
+        simulate: sampleSimulate('down', { downStrategy: 'oldest-batch' }),
+      },
+      {
+        id: 'n-ob-pack',
+        name: '⑥ 打包',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-down'],
+        targetDeviceIds: [st1],
+        simulate: sampleSimulate('pack'),
+      },
+      {
+        id: 'n-ob-ship',
+        name: '⑦ 发货（出库交接）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-pack'],
+        targetDeviceIds: [dock],
+        simulate: sampleSimulate('ship'),
+      },
+    ],
+  };
+}
+
 function makeBuiltinTemplates(): DataTemplate[] {
   const t0 = Date.now();
   return [
@@ -448,6 +537,11 @@ const builtinScenarios: Scenario[] = [
   (() => {
     const s = makeDoubleDeepScenario('scn-double-deep');
     s.stage = makeDoubleDeepStage(s.id);
+    return s;
+  })(),
+  (() => {
+    const s = makeOutboundScenario('scn-outbound-full');
+    s.stage = makeDoubleDeepStage(s.id);  // 出库场景也用 12 排的舞台
     return s;
   })(),
   (() => {
@@ -837,8 +931,8 @@ export const useStore = create<SandboxState>()(
       }),
     }),
     {
-      name: 'wms-sandbox-v15',
-      version: 15,
+      name: 'wms-sandbox-v16',
+      version: 16,
       // store 升级到 v11：把 shelves 数组迁移到 shelfRow 设备，清掉老结构
       migrate: (persisted: any, _version: number) => {
         if (!persisted || !Array.isArray(persisted.scenarios)) return persisted;
