@@ -33,6 +33,10 @@ export interface Inventory {
   skuId: string;
   qty: number;
   batch: string;
+  /** 上架时间戳（ms），用于 FIFO/批次策略 */
+  putawayAt?: number;
+  /** 锁定标记（库存单 lock 类型使用） */
+  locked?: boolean;
 }
 
 export interface OrderLine {
@@ -49,6 +53,10 @@ export interface Order {
   type: 'INBOUND' | 'OUTBOUND';
   lines: OrderLine[];
   createdAt: number;
+  /** 客户编码（出库单用） */
+  customer?: string;
+  /** 优先级（出库单用） */
+  priority?: '加急' | '常规' | '经济' | string;
   /** 设备 ID：入库单在哪个 dock 上申请 / 出库单在哪个 dock 上发货 */
   dockId?: string;
   /** 设备名（冗余字段，便于直接展示） */
@@ -139,9 +147,11 @@ export type SimulateSubKind =
   | 'down'              // 下架（实际从库位移除）
   | 'pack'              // 打包
   | 'ship'              // 发货/出库交接
+  | 'agv-deliver'       // AGV 配送：托盘 → 月台
   // ===== 库存辅助 =====
   | 'replenish'         // 补货扫描
   | 'inventory'         // 初始库存生成
+  | 'inventory-order'   // 库存单：盘点/调拨/损益/锁定
   | 'custom';           // 自定义脚本
 
 export type PutawayStrategyId =
@@ -305,6 +315,10 @@ export interface RuntimeContext {
   packs: PackRecord[];
   /** 发货记录 */
   shipments: ShipmentRecord[];
+  /** 库存单（盘点/调拨/损益/锁定） */
+  inventoryOrders: InventoryOrder[];
+  /** AGV 配送记录 */
+  agvDeliveries: AgvDelivery[];
 }
 
 /** 出库分配：出库订单行 → 库位 */
@@ -323,6 +337,14 @@ export interface OutboundAllocation {
   /** 下架时间 */
   downAt?: number;
   strategy?: OutboundAllocateStrategyId;
+  /** 关联的出库工位（拣选完成后托盘送到的工位） */
+  stationId?: string;
+  stationName?: string;
+  /** 关联的容器/托盘号（组盘后产生） */
+  containerNo?: string;
+  /** 关联的目标月台（AGV 配送后产生） */
+  dockId?: string;
+  dockName?: string;
 }
 
 /** 组盘单：把多张出库订单行按规则合并成一个容器（托盘/箱） */
@@ -334,6 +356,17 @@ export interface Cartonization {
   items: CartonizationItem[];   // 容器内的明细
   capacityUsed: number;         // 0~1
   createdAt: number;
+  /** 关联的拣选/组盘工位 */
+  stationId?: string;
+  stationName?: string;
+  /** 关联的目标月台（AGV 配送后产生） */
+  dockId?: string;
+  dockName?: string;
+  /** AGV 编号 */
+  agvId?: string;
+  /** AGV 配送开始/到达时间 */
+  agvStartedAt?: number;
+  agvArrivedAt?: number;
 }
 
 export interface CartonizationItem {
@@ -391,6 +424,42 @@ export interface ShipmentRecord {
   status: 'pending' | 'shipped';
 }
 
+/** AGV 配送记录：托盘 → 月台 */
+export interface AgvDelivery {
+  id: string;
+  cartonId: string;
+  sourceStationId?: string;  // 起点工位（打包工位）
+  dockId: string;            // 目标月台
+  dockName: string;
+  distance: number;          // AGV 行驶距离（米）
+  duration: number;          // 配送耗时（ms）
+  status: 'queued' | 'moving' | 'arrived';
+  queuedAt: number;
+  arrivedAt?: number;
+  agvId?: string;            // 分配的 AGV 编号
+}
+
+/** 库存单类型 */
+export type InventoryOrderType = 'cycle-count' | 'transfer' | 'adjustment' | 'lock';
+
+/** 库存单：盘点/调拨/损益/锁定 */
+export interface InventoryOrder {
+  id: string;                       // 单号 IN-xxxx
+  type: InventoryOrderType;         // 单据类型
+  skuId: string;
+  qty: number;                      // 数量（损益可为负）
+  batch?: string;
+  sourceLocationId?: string;        // 源库位（调拨/盘点）
+  targetLocationId?: string;        // 目标库位（调拨/锁定）
+  reason?: string;                  // 原因说明
+  status: 'pending' | 'applied' | 'failed';
+  createdAt: number;
+  appliedAt?: number;
+  /** 盘点实数与账面差 */
+  countedQty?: number;
+  variance?: number;
+}
+
 export interface SimulationRequest {
   scenario: Scenario;
   template?: DataTemplate;
@@ -412,6 +481,20 @@ export interface SimulationResult {
   config: { scope: Scope[]; scenarioId: string };
   timestamp: number;
   duration: number;
+  /** 出库分配结果 */
+  outboundAllocations?: OutboundAllocation[];
+  /** 组盘单（容器） */
+  cartonizations?: Cartonization[];
+  /** 拣选单 */
+  pickLists?: PickList[];
+  /** 打包记录 */
+  packs?: PackRecord[];
+  /** 发货记录 */
+  shipments?: ShipmentRecord[];
+  /** 库存单（盘点/调拨/损益/锁定） */
+  inventoryOrders?: InventoryOrder[];
+  /** AGV 配送记录 */
+  agvDeliveries?: AgvDelivery[];
   /** 仿真时各舞台设备的运行结果（按设备 ID 索引）—— 任务/指令/异常等 */
   stageDeviceResults?: Record<string, StageDeviceResult>;
   /** 仿真时舞台的快照（设备最终状态），用于 Dashboard 还原 */

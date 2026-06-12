@@ -9,16 +9,18 @@ import LocationGrid from '@/features/sandbox/LocationGrid';
 import PickPath from '@/features/sandbox/PickPath';
 import MetricsBar from '@/features/sandbox/MetricsBar';
 import AssignmentTable from '@/features/sandbox/AssignmentTable';
+import OutboundPathTable from '@/features/sandbox/OutboundPathTable';
 import { WcsStageView } from '@/features/dashboard/Widgets';
 import type { TraceEvent, ScenarioNode } from '@/lib/types';
 import { Link, useNavigate } from 'react-router-dom';
 
 const TABS = [
-  { id: 'grid',  label: '库位图',   sub: 'GRID' },
-  { id: 'pick',  label: '拣选路径', sub: 'PICK' },
-  { id: 'list',  label: '分配表',   sub: 'LIST' },
-  { id: 'api',   label: 'API 日志', sub: 'API' },
-  { id: 'stage', label: '舞台',     sub: 'STAGE' },
+  { id: 'grid',     label: '库位图',   sub: 'GRID' },
+  { id: 'pick',     label: '拣选路径', sub: 'PICK' },
+  { id: 'list',     label: '入库分配', sub: 'IN' },
+  { id: 'outbound', label: '出库路径', sub: 'OUT' },
+  { id: 'api',      label: 'API 日志', sub: 'API' },
+  { id: 'stage',    label: '舞台',     sub: 'STAGE' },
 ] as const;
 type TabId = typeof TABS[number]['id'];
 
@@ -79,9 +81,10 @@ export default function SandboxPage() {
   };
 
   return (
-    <div className="h-[calc(100vh-3rem)] grid grid-cols-[320px_1fr_600px] grid-rows-[1fr_auto]">
+    <div className="h-[calc(100vh-3rem)] flex flex-col">
+      <div className="flex-1 min-h-0 grid grid-cols-[320px_1fr_600px]">
       {/* 左：场景 + 配置 */}
-      <section className="row-span-1 border-r border-bg-border bg-bg-panel/40 overflow-y-auto flex flex-col">
+      <section className="row-span-1 border-r border-bg-border bg-bg-panel/40 overflow-y-auto flex flex-col min-h-0">
         <div className="p-4 border-b border-bg-border sticky top-0 bg-bg-panel/95 z-10">
           <div className="flex items-center justify-between">
             <div className="min-w-0">
@@ -136,7 +139,7 @@ export default function SandboxPage() {
       </section>
 
       {/* 中：轨迹 + 指标 */}
-      <section className="row-span-1 border-r border-bg-border bg-bg-base/30 flex flex-col min-w-0">
+      <section className="row-span-1 border-r border-bg-border bg-bg-base/30 flex flex-col min-w-0 min-h-0 overflow-hidden">
         <div className="p-4 border-b border-bg-border flex items-center justify-between">
           <div>
             <div className="font-mono text-sm tracking-wider text-ink-primary">EXECUTION TRACE</div>
@@ -159,7 +162,7 @@ export default function SandboxPage() {
       </section>
 
       {/* 右：看板 */}
-      <section className="row-span-1 bg-bg-panel/40 flex flex-col min-w-0">
+      <section className="row-span-1 bg-bg-panel/40 flex flex-col min-w-0 min-h-0 overflow-hidden">
         <div className="p-4 border-b border-bg-border">
           <div className="flex items-center justify-between mb-3">
             <div>
@@ -182,11 +185,12 @@ export default function SandboxPage() {
             ))}
           </div>
         </div>
-        <div className={`flex-1 min-h-0 flex flex-col ${tab === 'stage' ? 'p-0' : 'p-4 overflow-y-auto'}`}>
-          {tab === 'grid'  && <LocationGrid />}
-          {tab === 'pick'  && <PickPath />}
-          {tab === 'list'  && <AssignmentTable />}
-          {tab === 'api'   && <ApiLogPanel events={events} />}
+        <div className={`flex-1 min-h-0 flex flex-col ${tab === 'stage' ? 'p-0 overflow-hidden' : 'p-4 overflow-y-auto'}`}>
+          {tab === 'grid'     && <LocationGrid />}
+          {tab === 'pick'     && <PickPath />}
+          {tab === 'list'     && <AssignmentTable />}
+          {tab === 'outbound' && <OutboundPathTable />}
+          {tab === 'api'      && <ApiLogPanel events={events} />}
           {tab === 'stage' && (
             scenario?.stage ? (
               <WcsStageView
@@ -203,9 +207,10 @@ export default function SandboxPage() {
           )}
         </div>
       </section>
+      </div>
 
-      {/* 底部：操作栏 */}
-      <section className="col-span-3 h-14 border-t border-bg-border bg-bg-panel/95 flex items-center px-4 gap-3">
+      {/* 底部：操作栏（flex-shrink-0 防止被挤压到屏幕外） */}
+      <section className="flex-shrink-0 h-14 border-t border-bg-border bg-bg-panel/95 flex items-center px-4 gap-3 z-20">
         <button
           onClick={handleRun}
           disabled={!canRun}

@@ -1,6 +1,6 @@
 import type {
   Assignment, Location, Order, OrderLine, ReplenishSuggestion, Scenario, ScenarioNode, DataTemplate, TraceEvent, Metrics, Inventory, SKU, SimulateConfig, ApiConfig, RuntimeContext,
-  OutboundAllocation, Cartonization, PickList, PackRecord, ShipmentRecord,
+  OutboundAllocation, Cartonization, PickList, PackRecord, ShipmentRecord, InventoryOrder, AgvDelivery,
 } from './types';
 import { makeRng, manhattan, pickOne, randInt, shortId, pad } from './utils';
 import { buildLocations, buildSKUs, buildInitialInventory, buildInboundOrders, buildOutboundOrders, GRID_ROWS, GRID_COLS } from './mock';
@@ -224,7 +224,7 @@ function templateRowsToOrders(
   const rows = generateRows(tpl);
   // 自定义行：直接保留 row.sku 原值（演示/测试场景要严格用模板指定的 SKU）
   const isCustom = !!(tpl.customRows && tpl.customRows.length > 0);
-  return rows.map((row, i) => {
+  return rows.map((row: any, i) => {
     const line: OrderLine = {
       id: `L-${i}`,
       skuId: isCustom
@@ -238,8 +238,10 @@ function templateRowsToOrders(
       id: String(row.orderId ?? `${type === 'INBOUND' ? 'IB' : 'OB'}-${pad(i + 1, 4)}`),
       type,
       lines: [line],
+      customer: row.customer ? String(row.customer) : undefined,
+      priority: row.priority ? String(row.priority) : undefined,
       createdAt: Date.now() - randInt(rng, 0, 3600_000),
-    };
+    } as Order;
   });
 }
 
@@ -338,7 +340,39 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
       payload: { orderCount: orders.length, sample: orders[0], source, templateId: boundTpl?.id, dockSummaries, sourceDeviceIds: node.sourceDeviceIds },
     };
   },
-  inventory: async (node, ctx) => {
+  inventory: async (node, ctx, _apiCalls, tplMap) => {
+    // 如果节点绑定了模板（customRows），按模板显式播种（场景 3 用）
+    if (node.templateId) {
+      const tpl = tplMap[node.templateId];
+      if (tpl && tpl.customRows && tpl.customRows.length > 0) {
+        const targetRes = resolveDeviceIdsToLocationIds(node.targetDeviceIds, _stage);
+        const targetLocIds = targetRes.ids;
+        const usableLocs = targetLocIds
+          ? _locations.filter((l) => l.zone === 'STORAGE' && targetLocIds.has(l.id))
+          : _locations.filter((l) => l.zone === 'STORAGE');
+        if (usableLocs.length === 0) {
+          return { summary: '⚠ 模板播种时无可用 STORAGE 库位', payload: { invCount: 0 } };
+        }
+        // 按模板行 round-robin 写入库存：每行分配一个库位
+        const now = Date.now();
+        const seed: Inventory[] = tpl.customRows.map((row: any, i) => {
+          const loc = usableLocs[i % usableLocs.length];
+          return {
+            locationId: loc.id,
+            skuId: String(row.sku ?? `SKU-${pad(i + 1, 4)}`),
+            qty: Number(row.qty) || 10,
+            batch: String(row.batch ?? `B${pad(i + 1, 3)}`),
+            putawayAt: now - i * 86_400_000,  // 倒序放上架时间：第 1 行最久远（FIFO 出库先出）
+          };
+        });
+        ctx.inventory = seed;
+        return {
+          summary: `模板播种库存 ${seed.length} 条 · 行数 ${tpl.customRows.length} · 库位数 ${new Set(seed.map((i) => i.locationId)).size}`,
+          payload: { invCount: seed.length, template: tpl.id },
+        };
+      }
+    }
+    // 默认：随机生成
     const seed = (ctx.variables._seed as number) + 99;
     // 节点级目标设备：库存只生成在绑定的库位
     const targetRes = resolveDeviceIdsToLocationIds(node.targetDeviceIds, _stage);
@@ -363,6 +397,98 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
         targetUnmatched: targetRes.unmatched,
         zoneExpanded: targetRes.zoneExpanded,
         bound: !!targetLocIds,
+      },
+    };
+  },
+
+  /**
+   * 库存单：盘点/调拨/损益/锁定
+   * - cycle-count : 盘点（按 sourceLocationId 查账面 → 模拟实数 → 计算 variance）
+   * - transfer    : 调拨（源库位移除 → 目标库位增加）
+   * - adjustment  : 损益（增减库存数量，qty 可正可负）
+   * - lock        : 锁定（标记库位为不可分配）
+   */
+  'inventory-order': async (node, ctx, _apiCalls, tplMap) => {
+    const tpl = node.templateId ? tplMap[node.templateId] : undefined;
+    if (!tpl) return { summary: '⚠ 库存单未配置模板（templateId）', payload: {} };
+    const rows = tpl.customRows && tpl.customRows.length > 0
+      ? tpl.customRows
+      : generateRows(tpl);
+    const now = Date.now();
+    const orders: InventoryOrder[] = [];
+    let applied = 0;
+    let failed = 0;
+    rows.forEach((row: any, i) => {
+      const type = String(row.type ?? 'cycle-count') as InventoryOrder['type'];
+      const order: InventoryOrder = {
+        id: String(row.id ?? `IO-${pad(i + 1, 5)}`),
+        type,
+        skuId: String(row.sku ?? `SKU-${pad(i + 1, 4)}`),
+        qty: Number(row.qty) || 0,
+        batch: row.batch ? String(row.batch) : undefined,
+        sourceLocationId: row.sourceLocationId ? String(row.sourceLocationId) : undefined,
+        targetLocationId: row.targetLocationId ? String(row.targetLocationId) : undefined,
+        reason: row.reason ? String(row.reason) : undefined,
+        status: 'pending',
+        createdAt: now,
+      };
+      // 应用到 ctx.inventory
+      if (type === 'transfer' && order.sourceLocationId && order.targetLocationId) {
+        const src = order.sourceLocationId;
+        const dst = order.targetLocationId;
+        const sIdx = ctx.inventory.findIndex((inv) => inv.locationId === src && inv.skuId === order.skuId);
+        const tIdx = ctx.inventory.findIndex((inv) => inv.locationId === dst && inv.skuId === order.skuId);
+        if (sIdx >= 0 && ctx.inventory[sIdx].qty >= order.qty) {
+          ctx.inventory[sIdx] = { ...ctx.inventory[sIdx], qty: ctx.inventory[sIdx].qty - order.qty };
+          if (ctx.inventory[sIdx].qty === 0) ctx.inventory.splice(sIdx, 1);
+          if (tIdx >= 0) {
+            ctx.inventory[tIdx] = { ...ctx.inventory[tIdx], qty: ctx.inventory[tIdx].qty + order.qty };
+          } else {
+            ctx.inventory.push({ locationId: dst, skuId: order.skuId, qty: order.qty, batch: order.batch ?? '', putawayAt: now });
+          }
+          order.status = 'applied'; order.appliedAt = now; applied++;
+        } else { order.status = 'failed'; failed++; }
+      } else if (type === 'adjustment' && order.sourceLocationId) {
+        const src = order.sourceLocationId;
+        const idx = ctx.inventory.findIndex((inv) => inv.locationId === src && inv.skuId === order.skuId);
+        if (idx >= 0) {
+          ctx.inventory[idx] = { ...ctx.inventory[idx], qty: Math.max(0, ctx.inventory[idx].qty + order.qty) };
+          order.status = 'applied'; order.appliedAt = now; applied++;
+        } else if (order.qty > 0) {
+          ctx.inventory.push({ locationId: src, skuId: order.skuId, qty: order.qty, batch: order.batch ?? '', putawayAt: now });
+          order.status = 'applied'; order.appliedAt = now; applied++;
+        } else { order.status = 'failed'; failed++; }
+      } else if (type === 'cycle-count' && order.sourceLocationId) {
+        const src = order.sourceLocationId;
+        const idx = ctx.inventory.findIndex((inv) => inv.locationId === src && inv.skuId === order.skuId);
+        const bookQty = idx >= 0 ? ctx.inventory[idx].qty : 0;
+        // 模拟实数：账面的 90%~110%
+        const counted = Math.round(bookQty * (0.9 + ((i * 17) % 21) / 100));
+        order.countedQty = counted;
+        order.variance = counted - bookQty;
+        order.status = 'applied'; order.appliedAt = now; applied++;
+      } else if (type === 'lock' && order.sourceLocationId) {
+        const src = order.sourceLocationId;
+        // 锁定：在 inventory 标记上 lock=true
+        for (const inv of ctx.inventory) {
+          if (inv.locationId === src) {
+            (inv as any).locked = true;
+          }
+        }
+        order.status = 'applied'; order.appliedAt = now; applied++;
+      } else {
+        order.status = 'failed'; failed++;
+      }
+      orders.push(order);
+    });
+    ctx.inventoryOrders = orders;
+    return {
+      summary: `库存单 ${orders.length} 张 · 应用 ${applied} · 失败 ${failed}`,
+      payload: {
+        count: orders.length,
+        applied,
+        failed,
+        types: orders.reduce<Record<string, number>>((acc, o) => { acc[o.type] = (acc[o.type] ?? 0) + 1; return acc; }, {}),
       },
     };
   },
@@ -605,6 +731,104 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
       },
     };
   },
+
+  /**
+   * AGV 配送：组盘后的托盘 → 多个出库月台
+   * - 节点级 targetDeviceIds：限定可用的月台（dock）
+   * - 策略：客户分月台（同 customer → 同月台）/ 轮询 / 最近
+   * - 起点：拣选工位（carton.sourceStationId）→ AGV 调度 → 月台
+   */
+  'agv-deliver': async (node, ctx) => {
+    if (!ctx.cartonizations || ctx.cartonizations.length === 0) {
+      return { summary: '⚠ 未先执行「组盘」', payload: {} };
+    }
+    if (!_stage) {
+      return { summary: '⚠ 舞台未配置', payload: {} };
+    }
+    // 目标月台
+    const dockRes = resolveDeviceIdsToLocationIds(node.targetDeviceIds, _stage);
+    const docks = dockRes.matched;
+    if (docks.length === 0) {
+      return { summary: '⚠ AGV 配送未指定目标月台', payload: {} };
+    }
+    // 起点工位
+    const srcRes = resolveDeviceIdsToLocationIds(node.sourceDeviceIds, _stage);
+    const sources = srcRes.matched.length > 0
+      ? srcRes.matched
+      : _stage.devices.filter((d) => d.kind === 'station');
+    const strategy = node.simulate?.pickStrategy ?? 'largest_gap';
+    const now = Date.now();
+    // 按 customer 索引月台（每客户优先走同月台）
+    const customerToDock = new Map<string, typeof docks[number]>();
+    const deliveries: AgvDelivery[] = [];
+    let agvIdx = 0;
+    ctx.cartonizations.forEach((c, i) => {
+      // 推断 customer：取第一个 sourceOrder 的 customer
+      const firstOrderId = c.sourceOrderIds[0];
+      const firstOrder = ctx.pickOrders.find((o) => o.id === firstOrderId);
+      const customer = (firstOrder as any)?.customer ?? firstOrderId ?? 'CUST-DEFAULT';
+      // 月台选择
+      let dock: typeof docks[number];
+      if (customerToDock.has(customer)) {
+        dock = customerToDock.get(customer)!;
+      } else {
+        // 选当前 cartons 数最少的月台（负载均衡）
+        const dockLoad = new Map<string, number>();
+        for (const d of docks) dockLoad.set(d.id, 0);
+        for (const del of deliveries) dockLoad.set(del.dockId, (dockLoad.get(del.dockId) ?? 0) + 1);
+        const min = Math.min(...dockLoad.values());
+        const candidates = docks.filter((d) => (dockLoad.get(d.id) ?? 0) === min);
+        dock = candidates[i % candidates.length];
+        customerToDock.set(customer, dock);
+      }
+      // 起点工位
+      const src = sources[i % sources.length];
+      // 距离/耗时
+      const dist = 15 + (i * 7) % 20;  // 15~35m
+      const dur = dist * 1500;          // 1.5s/m
+      agvIdx++;
+      deliveries.push({
+        id: `AGV-${pad(agvIdx, 4)}`,
+        cartonId: c.id,
+        sourceStationId: src?.id,
+        dockId: dock.id,
+        dockName: dock.name,
+        distance: dist,
+        duration: dur,
+        status: 'arrived',
+        queuedAt: now,
+        arrivedAt: now + dur,
+        agvId: `AGV-${pad(((agvIdx - 1) % 3) + 1, 2)}`,
+      });
+    });
+    ctx.agvDeliveries = deliveries;
+    // 写回 carton 与 allocation 的 dockId（发货时用 + 库位悬停看 trace 用）
+    for (const d of deliveries) {
+      const c = ctx.cartonizations.find((x) => x.id === d.cartonId);
+      if (c) {
+        c.dockId = d.dockId;
+        c.dockName = d.dockName;
+        c.agvId = d.agvId;
+        c.agvStartedAt = d.queuedAt;
+        c.agvArrivedAt = d.arrivedAt;
+      }
+      // 反向回填：所有包含此 carton sourceOrderId 的 allocation
+      if (ctx.outboundAllocations && c) {
+        for (const a of ctx.outboundAllocations) {
+          if (c.sourceOrderIds.includes(a.orderId)) {
+            a.containerNo = c.containerNo;
+            a.dockId = d.dockId;
+            a.dockName = d.dockName;
+          }
+        }
+      }
+    }
+    const dockStats = deliveries.reduce<Record<string, number>>((acc, d) => { acc[d.dockName] = (acc[d.dockName] ?? 0) + 1; return acc; }, {});
+    return {
+      summary: `AGV 配送 ${deliveries.length} 个托盘 → ${Object.keys(dockStats).length} 个月台 · 总里程 ${deliveries.reduce((s, d) => s + d.distance, 0)} m`,
+      payload: { count: deliveries.length, dockCount: Object.keys(dockStats).length, dockStats, strategy },
+    };
+  },
   custom: async (node, ctx) => {
     // 简化实现：只回显 customScript
     const script = node.simulate?.customScript ?? '';
@@ -645,6 +869,22 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
       if (!invBySku.has(inv.skuId)) invBySku.set(inv.skuId, []);
       invBySku.get(inv.skuId)!.push(inv);
     }
+    // 取出所有 PICK 工位（按所选或全部），按位置排序
+    const pickStations = _stage
+      ? _stage.devices.filter((d) => d.kind === 'station' && (d.fields?.role === 'pick' || d.fields?.role === 'pack' || !d.fields?.role)).map((d) => ({
+          id: d.id, name: d.name, x: d.position.x, y: d.position.y, w: d.size.w, h: d.size.h,
+        }))
+      : [];
+    const nearestStation = (loc: { x: number; y: number } | undefined) => {
+      if (pickStations.length === 0 || !loc) return null;
+      let best = pickStations[0]; let bestD = Infinity;
+      for (const s of pickStations) {
+        const sx = s.x + s.w / 2; const sy = s.y + s.h / 2;
+        const d = Math.abs(sx - loc.x) + Math.abs(sy - loc.y);
+        if (d < bestD) { bestD = d; best = s; }
+      }
+      return best;
+    };
     for (const order of ctx.pickOrders) {
       for (const line of order.lines) {
         const candidates = invBySku.get(line.skuId) ?? [];
@@ -683,6 +923,8 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
         const takeCount = strategy === 'multi-location' ? Math.min(sorted.length, 3) : 1;
         const picked = sorted.slice(0, takeCount);
         picked.forEach((inv, idx) => {
+          const locRec = _locationById.get(inv.locationId);
+          const stn = nearestStation(locRec ? { x: locRec.col, y: locRec.row } : undefined);
           allocations.push({
             orderLineId: line.id,
             orderId: order.id,
@@ -694,6 +936,8 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
             splitCount: picked.length,
             createdAt: now,
             strategy,
+            stationId: stn?.id,
+            stationName: stn?.name,
           });
         });
       }
@@ -749,6 +993,9 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
         if (curItems.length === 0) return;
         cartonIdx++;
         const total = curItems.reduce((s, x) => s + x.qty, 0);
+        // 关联工位：取本容器内第一个分配带 stationId 的工位
+        const stn = curItems.find((x) => x.stationId)?.stationId;
+        const stnName = curItems.find((x) => x.stationName)?.stationName;
         cartons.push({
           id: `CTN-${pad(cartonIdx, 5)}`,
           strategy,
@@ -764,6 +1011,8 @@ const SIMULATE_EXECUTORS: Record<SimulateConfig['subKind'], NodeExecutor> = {
           })),
           capacityUsed: total / capacity,
           createdAt: now,
+          stationId: stn,
+          stationName: stnName,
         });
         curItems = [];
         curQty = 0;
@@ -1118,6 +1367,8 @@ export async function runScenario(
     pickLists: [],
     packs: [],
     shipments: [],
+    inventoryOrders: [],
+    agvDeliveries: [],
   };
 
   // 旧版全局模板兜底：若 inbound 节点未绑模板且给了全局 template，则预填 orders
@@ -1214,6 +1465,9 @@ export async function runScenario(
     inventory: ctx.inventory,
     trace,
     skus: _skus,
+    cartonizations: ctx.cartonizations,
+    agvDeliveries: ctx.agvDeliveries,
+    outboundAllocations: ctx.outboundAllocations,
   });
 
   // === 舞台快照（深拷贝设备的最终状态） ===
@@ -1254,10 +1508,13 @@ function buildStageDeviceResults(args: {
   inventory: Inventory[];
   trace: TraceEvent[];
   skus: SKU[];
+  cartonizations?: import('./types').Cartonization[];
+  agvDeliveries?: import('./types').AgvDelivery[];
+  outboundAllocations?: import('./types').OutboundAllocation[];
 }): Record<string, import('./types').StageDeviceResult> {
   const out: Record<string, import('./types').StageDeviceResult> = {};
   if (!args.stage) return out;
-  const { stage, orders, pickOrders, assignments, picks, trace, skus } = args;
+  const { stage, orders, pickOrders, assignments, picks, trace, skus, cartonizations = [], agvDeliveries = [], outboundAllocations = [] } = args;
   // 给每个设备一个基础结果
   for (const dev of stage.devices) {
     out[dev.id] = {
@@ -1419,6 +1676,41 @@ function buildStageDeviceResults(args: {
       r.status = assignments.length > 0 ? 'running' : 'idle';
     } else {
       r.status = 'idle';
+    }
+    // 🆕 出库工位：补「经过本工位的容器/托盘」列表
+    const cartAtStation = cartonizations.filter((c) => c.stationId === dev.id);
+    if (cartAtStation.length > 0) {
+      r.assignmentsSummary = cartAtStation.map((c) => ({
+        orderId: c.sourceOrderIds.join(','),
+        sku: `${c.items.length} 行 · 容量 ${Math.round(c.capacityUsed * 100)}%`,
+        qty: c.items.reduce((s, x) => s + x.qty, 0),
+        container: c.containerNo,
+        locationId: '',
+      }));
+      r.currentCommand = role === 'pack' ? '打包' : '拣选';
+      r.taskNumber = cartAtStation[0].containerNo;
+      r.barcode = cartAtStation[0].containerNo;
+      r.ordersHandled = (r.ordersHandled ?? 0) + cartAtStation.length;
+    }
+  }
+  // 🆕 月台：补「即将到达本月的托盘」列表
+  for (const dev of stage.devices) {
+    if (dev.kind !== 'dock') continue;
+    const r = out[dev.id];
+    const delToDock = agvDeliveries.filter((d) => d.dockId === dev.id);
+    if (delToDock.length > 0) {
+      r.assignmentsSummary = delToDock.map((d) => ({
+        orderId: d.id,
+        sku: d.dockName,
+        qty: 0,
+        container: d.cartonId,
+        locationId: d.agvId ?? '',
+      }));
+      r.ordersHandled = (r.ordersHandled ?? 0) + delToDock.length;
+      r.taskNumber = delToDock[0].cartonId;
+      r.barcode = delToDock[0].cartonId;
+      r.currentCommand = 'AGV 配送到达';
+      if (r.status !== 'fault') r.status = 'running';
     }
   }
   return out;

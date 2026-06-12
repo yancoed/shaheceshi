@@ -7,6 +7,7 @@ const SIMULATE_LABELS: Record<SimulateSubKind, string> = {
   inbound: '入库申请',
   outbound: '出库单',
   inventory: '初始库存',
+  'inventory-order': '库存单',
   allocate: '入库·库存分配',
   putaway: '入库·上架',
   'outbound-allocate': '出库·分配',
@@ -16,6 +17,7 @@ const SIMULATE_LABELS: Record<SimulateSubKind, string> = {
   down: '出库·下架',
   pack: '出库·打包',
   ship: '出库·发货',
+  'agv-deliver': '出库·AGV 配送',
   replenish: '补货扫描',
   custom: '自定义脚本',
 };

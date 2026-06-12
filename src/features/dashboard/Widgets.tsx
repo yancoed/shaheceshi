@@ -513,6 +513,8 @@ export function DeviceMapWidget({ stage, result, selectedId, onSelect, showStatu
       createdAt?: number;
       putawayAt?: number;
       pickAt?: number;
+      stationName?: string;
+      dockName?: string;
     }>();
     if (!result) return m;
     const lineKey = (o: { id: string; lines: { id: string; skuId: string; qty: number; container?: string; batch?: string }[] }) => {
@@ -523,6 +525,11 @@ export function DeviceMapWidget({ stage, result, selectedId, onSelect, showStatu
     const orderMap = new Map<string, Record<string, { skuId: string; qty: number; container?: string; batch?: string }>>();
     for (const o of result.orders ?? []) orderMap.set(o.id, lineKey(o));
     for (const o of result.pickOrders ?? []) orderMap.set(o.id, lineKey(o));
+    // 索引：locationId → 出库分配（用于补 station / container / dock 信息）
+    const outByLoc = new Map<string, NonNullable<typeof result.outboundAllocations>[number]>();
+    for (const a of result.outboundAllocations ?? []) {
+      if (!outByLoc.has(a.locationId)) outByLoc.set(a.locationId, a);
+    }
     // 1) 入库分配（按 locationId 登记）
     for (const a of result.assignments ?? []) {
       const ln = orderMap.get(a.orderId)?.[a.orderLineId];
@@ -543,17 +550,20 @@ export function DeviceMapWidget({ stage, result, selectedId, onSelect, showStatu
     for (const p of result.picks ?? []) {
       for (const step of (p.steps ?? [])) {
         const cur = m.get(step.locationId);
+        const alloc = outByLoc.get(step.locationId);
         m.set(step.locationId, {
           orderId: p.orderId,
           sku: step.skuId,
           qty: step.qty,
-          container: cur?.container,
+          container: cur?.container ?? alloc?.containerNo,
           batch: step.batch,
           type: 'OUT',
           phase: 'picked',
           createdAt: p.startedAt,
           putawayAt: undefined,
           pickAt: step.pickAt,
+          stationName: alloc?.stationName,
+          dockName: alloc?.dockName,
         });
       }
     }
@@ -639,10 +649,15 @@ export function DeviceMapWidget({ stage, result, selectedId, onSelect, showStatu
                           `SKU: ${hit.sku}`,
                           `数量: ${hit.qty}`,
                           hit.batch ? `批次: ${hit.batch}` : null,
-                          hit.container ? `容器: ${hit.container}` : null,
+                          hit.container ? `容器/托盘: ${hit.container}` : null,
                           `申请: ${fmtTime(hit.createdAt)}`,
                           hit.putawayAt ? `上架: ${fmtTime(hit.putawayAt)}` : null,
                           hit.pickAt ? `下降: ${fmtTime(hit.pickAt)}` : null,
+                          // 出库 trace：从库位出 → 拣选工位 → AGV → 月台
+                          hit.type === 'OUT' ? `──────── 出库路径 ────────` : null,
+                          hit.type === 'OUT' && hit.stationName ? `→ 拣选工位: ${hit.stationName}` : null,
+                          hit.type === 'OUT' && hit.container ? `→ 容器/托盘: ${hit.container}` : null,
+                          hit.type === 'OUT' && hit.dockName ? `→ AGV 配送至: ${hit.dockName}` : null,
                         ].filter(Boolean).join('\n')
                       : `${locId} · 空`}
                   >

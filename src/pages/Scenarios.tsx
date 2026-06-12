@@ -15,6 +15,8 @@ export default function ScenariosPage() {
   const updateScenario = useStore((s) => s.updateScenario);
   const deleteScenario = useStore((s) => s.deleteScenario);
   const duplicateScenario = useStore((s) => s.duplicateScenario);
+  const resetScenarioStage = useStore((s) => s.resetScenarioStage);
+  const resetAllData = useStore((s) => s.resetAllData);
   const addNode = useStore((s) => s.addNode);
   const addTemplate = useStore((s) => s.addTemplate);
   const deleteTemplate = useStore((s) => s.deleteTemplate);
@@ -86,9 +88,18 @@ export default function ScenariosPage() {
           <div>
             <div className="label">场景 / SCENARIOS</div>
           </div>
-          <button onClick={handleCreateScenario} className="btn-ghost text-[10px] py-1 px-1.5">
-            <Plus size={10} /> 新建
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => { if (confirm('⚠ 紧急重置：清空所有 localStorage + 刷新页面。\n\n会丢失：自定义场景/模板/看板/结果。\n会修复：所有缓存导致的舞台错乱。\n\n确定继续？')) resetAllData(); }}
+              title="清空 localStorage 并刷新"
+              className="text-accent-red hover:bg-accent-red/15 text-[10px] py-1 px-1.5 border border-accent-red/40 flex items-center gap-0.5"
+            >
+              <Trash2 size={10} /> 🆘 重置
+            </button>
+            <button onClick={handleCreateScenario} className="btn-ghost text-[10px] py-1 px-1.5">
+              <Plus size={10} /> 新建
+            </button>
+          </div>
         </div>
         <div className="p-2 space-y-1">
           {scenarios.map((s) => {
@@ -114,6 +125,9 @@ export default function ScenariosPage() {
                   {s.builtin && <span className="chip-blue">内置</span>}
                 </div>
                 <div className="opacity-0 group-hover:opacity-100 flex gap-1 mt-1.5">
+                  <button onClick={(e) => { e.stopPropagation(); if (confirm('确认从代码重新生成该场景的舞台？\n（仅重建舞台，不影响节点）')) resetScenarioStage(s.id); }} className="text-ink-muted hover:text-accent-green text-[10px] flex items-center gap-0.5">
+                    <Database size={10} /> 重置舞台
+                  </button>
                   <button onClick={(e) => { e.stopPropagation(); duplicateScenario(s.id); }} className="text-ink-muted hover:text-accent-amber text-[10px] flex items-center gap-0.5">
                     <Copy size={10} /> 复制
                   </button>

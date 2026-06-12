@@ -4,14 +4,26 @@ import { X, ArrowUp, ArrowDown, Power, Trash2, MapPin, ArrowRight, Package, Cpu 
 import ApiConfigEditor from './ApiConfigEditor';
 
 export const SIMULATE_OPTIONS: { id: SimulateSubKind; name: string; desc: string }[] = [
+  // ===== 入库 =====
   { id: 'inbound',   name: '入库申请',   desc: '生成入库单 + 容器' },
-  { id: 'outbound',  name: '出库单',     desc: '生成出库单 + 拣选行' },
-  { id: 'inventory', name: '初始库存',   desc: '生成基础库存分布' },
+  { id: 'inventory', name: '初始库存',   desc: '生成基础库存分布（出库前置）' },
   { id: 'allocate',  name: '库存分配',   desc: '为入库行分配库位' },
-  { id: 'putaway',   name: '上架策略',   desc: '校验上架结果' },
-  { id: 'pick',      name: '拣选路径',   desc: '计算拣选路径' },
-  { id: 'replenish', name: '补货扫描',   desc: '生成补货建议' },
-  { id: 'custom',    name: '自定义脚本', desc: '执行自定义脚本片段' },
+  { id: 'putaway',   name: '上架策略',   desc: '入库实际落地（pending→occupied）' },
+  // ===== 出库 =====
+  { id: 'outbound',             name: '出库单',         desc: '生成出库单 + 拣选行' },
+  { id: 'outbound-allocate',    name: '出库·分配',      desc: '订单行 → 库位（6 策略）' },
+  { id: 'cartonize',            name: '出库·组盘',      desc: '订单行合并到容器（5 策略）' },
+  { id: 'picklist',             name: '出库·拣选单',    desc: '生成拣选单（4 策略）' },
+  { id: 'pick',                 name: '出库·拣选路径',  desc: '计算拣选行走路径' },
+  { id: 'down',                 name: '出库·下架',      desc: '从库位实际移除（6 策略）' },
+  { id: 'pack',                 name: '出库·打包',      desc: '按容器生成打包记录' },
+  { id: 'ship',                 name: '出库·发货',      desc: '按客户/目的地生成运单' },
+  { id: 'agv-deliver',          name: '出库·AGV 配送',  desc: '托盘 → 月台（客户分月台/轮询）' },
+  // ===== 库存辅助 =====
+  { id: 'inventory',        name: '初始库存',   desc: '生成基础库存分布（出库前置）' },
+  { id: 'inventory-order',  name: '库存单',     desc: '盘点/调拨/损益/锁定（读 库存单模板）' },
+  { id: 'replenish',        name: '补货扫描',   desc: '生成补货建议' },
+  { id: 'custom',           name: '自定义脚本', desc: '执行自定义脚本片段' },
 ];
 
 export default function NodeEditor({ node, scenarioId, isFirst, isLast }: { node: ScenarioNode; scenarioId: string; isFirst: boolean; isLast: boolean }) {
@@ -337,7 +349,9 @@ const SUBKIND_BINDING: Record<SimulateSubKind, { source: StageDeviceKind[]; targ
   down:       { source: ['shelf'],           target: ['station'],       sourceLabel: '从哪些库位下架',  targetLabel: '经由哪些工位',  sourceHint: '只从选中的库位下架',                                targetHint: '只让选中的工位执行下架（工位角色需配 pick）' },
   pack:       { source: [],                  target: ['station'],       sourceLabel: '',                  targetLabel: '经由哪些工位',  sourceHint: '',                                          targetHint: '只让选中的工位执行打包（工位角色需配 pack）' },
   ship:       { source: [],                  target: ['dock', 'station'], sourceLabel: '',                targetLabel: '从哪些位置出库', sourceHint: '',                                          targetHint: '只让选中的月台/工位执行发货' },
+  'agv-deliver': { source: ['station'],      target: ['dock'],          sourceLabel: '从哪些工位取出托盘', targetLabel: '送到哪些月台', sourceHint: '从选中的工位（打包区）取托盘', targetHint: '把托盘送到选中的出库月台' },
   replenish:  { source: ['shelf'],           target: ['station'],       sourceLabel: '扫描哪些库位',  targetLabel: '经由哪些工位',  sourceHint: '只扫描选中的库位',                                  targetHint: '只让选中的工位执行补货（工位角色需配 replenish）' },
+  'inventory-order': { source: ['shelf'], target: ['shelf'], sourceLabel: '从哪些库位操作', targetLabel: '写到哪些库位', sourceHint: '只对选中的库位做盘点/调拨/损益/锁定', targetHint: '调拨/锁定时可指定目标库位' },
   custom:     { source: ['dock', 'station', 'shelf', 'zone', 'aisle', 'stack', 'lift', 'pallet', 'tote'], target: ['dock', 'station', 'shelf', 'zone', 'aisle', 'stack', 'lift', 'pallet', 'tote'], sourceLabel: '从哪些设备读', targetLabel: '写到哪些设备', sourceHint: '执行时从这些设备读数据', targetHint: '执行结果写到这些设备' },
 };
 

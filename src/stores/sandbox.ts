@@ -40,6 +40,8 @@ interface SandboxState {
   updateScenario: (id: string, patch: Partial<Scenario>) => void;
   deleteScenario: (id: string) => void;
   duplicateScenario: (id: string) => void;
+  resetScenarioStage: (id: string) => void;
+  resetAllData: () => void;
 
   // === 节点操作 ===
   addNode: (scenarioId: string, node: ScenarioNode) => void;
@@ -338,88 +340,222 @@ function makeDoubleDeepScenario(scenarioId: string): Scenario {
 }
 
 /**
- * 场景 3 · 出库全流程（演示用，复用场景 2 舞台）
- * 出库申请 → 出库分配 → 组盘 → 拣选单 → 下架 → 打包 → 发货
+ * 场景 3 · 出库舞台（出库专用，区别于场景 2 的入库舞台）
+ * 布局：
+ *   - 12 排 + 3 巷道（保留）
+ *   - 2 个出库工位（左边，PICK 角色）
+ *   - 1 个 AGV 调度区（中部，agv 类型）
+ *   - 4 个出库月台（底部一排，DOCK-OUT-1~4）
+ *   - 路线：出库工位 → 巷道 → 排（outbound），AGV → 各月台
+ */
+function makeOutboundStage(scenarioId: string): Stage {
+  const t0 = Date.now();
+  const sid = scenarioId;
+  const st1 = `d-${sid}-station-1`;
+  const st2 = `d-${sid}-station-2`;
+  const a1 = `d-${sid}-aisle-1`;
+  const a2 = `d-${sid}-aisle-2`;
+  const a3 = `d-${sid}-aisle-3`;
+  const agv = `d-${sid}-agv-hub`;
+  const dock1 = `d-${sid}-dock-1`;
+  const dock2 = `d-${sid}-dock-2`;
+  const dock3 = `d-${sid}-dock-3`;
+  const dock4 = `d-${sid}-dock-4`;
+  const rowIds = Array.from({ length: 12 }, (_, i) => `d-${sid}-row-${i + 1}`);
+  return {
+    id: `stg-${sid}`,
+    name: '出库全流程 · 演示舞台',
+    description: '12 排 + 3 巷道 + 2 出库工位 + 1 AGV 调度区 + 4 出库月台（DOCK-OUT-1~4）',
+    createdAt: t0,
+    updatedAt: t0,
+    shelves: [],
+    doubleDeepPairs: {},
+    devices: [
+      // 12 个货架排（右侧）
+      { id: rowIds[0],  kind: 'shelfRow', name: '1 排',  position: { x: 50, y: 4  }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 1,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '1 排' } },
+      { id: rowIds[1],  kind: 'shelfRow', name: '2 排',  position: { x: 50, y: 8  }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 2,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '2 排' } },
+      { id: rowIds[2],  kind: 'shelfRow', name: '3 排',  position: { x: 50, y: 14 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 3,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '3 排' } },
+      { id: rowIds[3],  kind: 'shelfRow', name: '4 排',  position: { x: 50, y: 18 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 4,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '4 排' } },
+      { id: rowIds[4],  kind: 'shelfRow', name: '5 排',  position: { x: 50, y: 30 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 5,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '5 排' } },
+      { id: rowIds[5],  kind: 'shelfRow', name: '6 排',  position: { x: 50, y: 34 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 6,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '6 排' } },
+      { id: rowIds[6],  kind: 'shelfRow', name: '7 排',  position: { x: 50, y: 40 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 7,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '7 排' } },
+      { id: rowIds[7],  kind: 'shelfRow', name: '8 排',  position: { x: 50, y: 44 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 8,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '8 排' } },
+      { id: rowIds[8],  kind: 'shelfRow', name: '9 排',  position: { x: 50, y: 56 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 9,  fields: { ...buildDefaultFields('shelfRow'), rowLabel: '9 排' } },
+      { id: rowIds[9],  kind: 'shelfRow', name: '10 排', position: { x: 50, y: 60 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 10, fields: { ...buildDefaultFields('shelfRow'), rowLabel: '10 排' } },
+      { id: rowIds[10], kind: 'shelfRow', name: '11 排', position: { x: 50, y: 66 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 11, fields: { ...buildDefaultFields('shelfRow'), rowLabel: '11 排' } },
+      { id: rowIds[11], kind: 'shelfRow', name: '12 排', position: { x: 50, y: 70 }, size: { w: 46, h: 3.5 }, status: 'normal', cellCount: 8, shelfRow: 12, fields: { ...buildDefaultFields('shelfRow'), rowLabel: '12 排' } },
+      // 3 个巷道（垂直居中）
+      { id: a1, kind: 'aisle', name: '巷道 1', position: { x: 35, y: 9  }, size: { w: 12, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('aisle'), aisleCode: 'A01', aisleName: '出库巷道 1' } },
+      { id: a2, kind: 'aisle', name: '巷道 2', position: { x: 35, y: 35 }, size: { w: 12, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('aisle'), aisleCode: 'A02', aisleName: '出库巷道 2' } },
+      { id: a3, kind: 'aisle', name: '巷道 3', position: { x: 35, y: 61 }, size: { w: 12, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('aisle'), aisleCode: 'A03', aisleName: '出库巷道 3' } },
+      // 2 个出库工位（左边，PICK 角色）
+      { id: st1, kind: 'station', name: '出库工位 1', position: { x: 4, y: 18 }, size: { w: 18, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('station'), stationCode: 'OUT-ST01', stationName: '拣选工位 1' }, business: { stationRole: 'pick' } },
+      { id: st2, kind: 'station', name: '出库工位 2', position: { x: 4, y: 50 }, size: { w: 18, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('station'), stationCode: 'OUT-ST02', stationName: '拣选工位 2' }, business: { stationRole: 'pick' } },
+      // 1 个 AGV 调度区（中下方，agv 类型）
+      { id: agv, kind: 'agv', name: 'AGV 调度区', position: { x: 4, y: 78 }, size: { w: 18, h: 8 }, status: 'normal', fields: buildDefaultFields('agv') },
+      // 4 个出库月台（底部，水平排列）
+      { id: dock1, kind: 'dock', name: 'DOCK-OUT-1', position: { x: 30, y: 82 }, size: { w: 14, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('dock'), dockNo: 'DOCK-OUT-1', dockName: '出库月台 1' }, business: { outboundEvent: { enabled: true, ordersPerRun: 6, skuPool: [], avgLinesPerOrder: 2, avgQtyPerLine: 5, pickStrategy: 'single' } } },
+      { id: dock2, kind: 'dock', name: 'DOCK-OUT-2', position: { x: 46, y: 82 }, size: { w: 14, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('dock'), dockNo: 'DOCK-OUT-2', dockName: '出库月台 2' }, business: { outboundEvent: { enabled: true, ordersPerRun: 6, skuPool: [], avgLinesPerOrder: 2, avgQtyPerLine: 5, pickStrategy: 'single' } } },
+      { id: dock3, kind: 'dock', name: 'DOCK-OUT-3', position: { x: 62, y: 82 }, size: { w: 14, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('dock'), dockNo: 'DOCK-OUT-3', dockName: '出库月台 3' }, business: { outboundEvent: { enabled: true, ordersPerRun: 6, skuPool: [], avgLinesPerOrder: 2, avgQtyPerLine: 5, pickStrategy: 'single' } } },
+      { id: dock4, kind: 'dock', name: 'DOCK-OUT-4', position: { x: 78, y: 82 }, size: { w: 14, h: 8 }, status: 'normal', fields: { ...buildDefaultFields('dock'), dockNo: 'DOCK-OUT-4', dockName: '出库月台 4' }, business: { outboundEvent: { enabled: true, ordersPerRun: 6, skuPool: [], avgLinesPerOrder: 2, avgQtyPerLine: 5, pickStrategy: 'single' } } },
+      // 路线：出库工位 ← 巷道（出库商品流向：巷道 → 工位，箭头指向工位）
+      { id: `d-${sid}-r-st1-a1`, kind: 'route', name: '巷道 1 → ST-1', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: a1, routeTo: st1, routeType: 'outbound' },
+      { id: `d-${sid}-r-st2-a2`, kind: 'route', name: '巷道 2 → ST-2', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: a2, routeTo: st2, routeType: 'outbound' },
+      { id: `d-${sid}-r-st2-a3`, kind: 'route', name: '巷道 3 → ST-2', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: a3, routeTo: st2, routeType: 'outbound' },
+      // 路线：排 → 巷道（出库商品流向：排 → 巷道，箭头指向巷道）
+      { id: `d-${sid}-r-a1-1`,  kind: 'route', name: '1 排 → 巷道 1',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[0],  routeTo: a1, routeType: 'outbound' },
+      { id: `d-${sid}-r-a1-2`,  kind: 'route', name: '2 排 → 巷道 1',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[1],  routeTo: a1, routeType: 'outbound' },
+      { id: `d-${sid}-r-a1-3`,  kind: 'route', name: '3 排 → 巷道 1',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[2],  routeTo: a1, routeType: 'outbound' },
+      { id: `d-${sid}-r-a1-4`,  kind: 'route', name: '4 排 → 巷道 1',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[3],  routeTo: a1, routeType: 'outbound' },
+      { id: `d-${sid}-r-a2-5`,  kind: 'route', name: '5 排 → 巷道 2',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[4],  routeTo: a2, routeType: 'outbound' },
+      { id: `d-${sid}-r-a2-6`,  kind: 'route', name: '6 排 → 巷道 2',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[5],  routeTo: a2, routeType: 'outbound' },
+      { id: `d-${sid}-r-a2-7`,  kind: 'route', name: '7 排 → 巷道 2',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[6],  routeTo: a2, routeType: 'outbound' },
+      { id: `d-${sid}-r-a2-8`,  kind: 'route', name: '8 排 → 巷道 2',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[7],  routeTo: a2, routeType: 'outbound' },
+      { id: `d-${sid}-r-a3-9`,  kind: 'route', name: '9 排 → 巷道 3',  position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[8],  routeTo: a3, routeType: 'outbound' },
+      { id: `d-${sid}-r-a3-10`, kind: 'route', name: '10 排 → 巷道 3', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[9],  routeTo: a3, routeType: 'outbound' },
+      { id: `d-${sid}-r-a3-11`, kind: 'route', name: '11 排 → 巷道 3', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[10], routeTo: a3, routeType: 'outbound' },
+      { id: `d-${sid}-r-a3-12`, kind: 'route', name: '12 排 → 巷道 3', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: rowIds[11], routeTo: a3, routeType: 'outbound' },
+      // 路线：工位 → AGV 调度区（出库商品从工位出，送到 AGV）
+      { id: `d-${sid}-r-st1-agv`, kind: 'route', name: 'ST-1 → AGV', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: st1, routeTo: agv, routeType: 'both' },
+      { id: `d-${sid}-r-st2-agv`, kind: 'route', name: 'ST-2 → AGV', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: st2, routeTo: agv, routeType: 'both' },
+      // 路线：AGV → 各月台（AGV 配送到月台发货）
+      { id: `d-${sid}-r-agv-d1`, kind: 'route', name: 'AGV → DOCK-OUT-1', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: agv, routeTo: dock1, routeType: 'both' },
+      { id: `d-${sid}-r-agv-d2`, kind: 'route', name: 'AGV → DOCK-OUT-2', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: agv, routeTo: dock2, routeType: 'both' },
+      { id: `d-${sid}-r-agv-d3`, kind: 'route', name: 'AGV → DOCK-OUT-3', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: agv, routeTo: dock3, routeType: 'both' },
+      { id: `d-${sid}-r-agv-d4`, kind: 'route', name: 'AGV → DOCK-OUT-4', position: { x: 50, y: 50 }, size: { w: 4, h: 4 }, status: 'normal', fields: buildDefaultFields('route'), routeFrom: agv, routeTo: dock4, routeType: 'both' },
+    ],
+  };
+}
+
+/**
+ * 场景 3 · 出库全流程
+ * 库里有库存 → 出库单按库存生成 → 分配 → 下架单/拣选单 → 拣选组盘 → AGV 送到 4 个月台 → 发货
  */
 function makeOutboundScenario(scenarioId: string): Scenario {
   const t0 = Date.now();
   const sid = scenarioId;
-  // 出库工位（出库场景里也用 station）
+  // 出库工位
   const st1 = `d-${sid}-station-1`;
   const st2 = `d-${sid}-station-2`;
-  const dock = `d-${sid}-dock-1`;
+  // 4 个月台
+  const docks = [`d-${sid}-dock-1`, `d-${sid}-dock-2`, `d-${sid}-dock-3`, `d-${sid}-dock-4`];
+  // AGV 调度区
+  const agv = `d-${sid}-agv-hub`;
   return {
     id: sid,
     name: '场景 3 · 出库全流程',
-    description: '出库申请 → 出库分配 → 组盘 → 拣选单 → 下架 → 打包 → 发货（出库分配 6 策略 / 组盘 5 策略 / 拣选单 4 策略 / 下架 6 策略）',
+    description: '库存已有 → 出库申请 → 出库分配 → 下架单 → 拣选 → 组盘 → AGV 配送 → 发货（4 个月台）',
     builtin: true,
     createdAt: t0,
     updatedAt: t0,
     templateId: undefined,
-    stage: makeDoubleDeepStage(sid),  // 复用场景 2 的舞台（含 12 排 + 3 巷道 + 2 工位 + 1 月台）
+    stage: makeOutboundStage(sid),  // 出库专用舞台（2 出库工位 + 1 AGV + 4 出库月台 + 12 排 + 3 巷道）
     nodes: [
       {
-        id: 'n-ob-apply',
-        name: '① 出库申请',
+        // 关键：先按种子模板播种 12 条库存到 1-12 排（首行最久远 → FIFO 优先出）
+        id: 'n-ob-seed',
+        name: '① 初始库存（库里有货）',
         kind: 'simulate',
         enabled: true,
         dependsOn: [],
-        sourceDeviceIds: [dock],
+        targetDeviceIds: Array.from({ length: 12 }, (_, i) => `d-${sid}-row-${i + 1}`),
+        simulate: sampleSimulate('inventory'),
+        templateId: 'tpl-inventory-seed',
+      },
+      {
+        id: 'n-ob-inv-orders',
+        name: '② 库存单（盘点/调拨/损益/锁定）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-seed'],
+        sourceDeviceIds: Array.from({ length: 12 }, (_, i) => `d-${sid}-row-${i + 1}`),
+        targetDeviceIds: Array.from({ length: 12 }, (_, i) => `d-${sid}-row-${i + 1}`),
+        simulate: sampleSimulate('inventory-order'),
+        templateId: 'tpl-inventory-order',
+      },
+      {
+        id: 'n-ob-apply',
+        name: '③ 出库申请（按已有库存 SKU 生成）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-inv-orders'],
+        // 多个出库月台都能触发出库申请
+        sourceDeviceIds: docks,
         simulate: sampleSimulate('outbound', { putawayStrategy: 'fifo' }),
-        templateId: 'tpl-outbound-default',
+        templateId: 'tpl-outbound-from-inventory',
       },
       {
         id: 'n-ob-allocate',
-        name: '② 出库分配（库位 → 订单）',
+        name: '④ 出库分配（FIFO）',
         kind: 'simulate',
         enabled: true,
         dependsOn: ['n-ob-apply'],
-        sourceDeviceIds: [`d-${sid}-row-1`, `d-${sid}-row-2`, `d-${sid}-row-3`, `d-${sid}-row-4`, `d-${sid}-row-5`, `d-${sid}-row-6`],  // 限定从 1-6 排分配
+        sourceDeviceIds: Array.from({ length: 12 }, (_, i) => `d-${sid}-row-${i + 1}`),
         simulate: sampleSimulate('outbound-allocate', { outboundAllocateStrategy: 'fifo' }),
       },
       {
-        id: 'n-ob-cartonize',
-        name: '③ 组盘（按客户分托盘）',
+        id: 'n-ob-picklist',
+        name: '⑤ 下架单生成（按区域合批）',
         kind: 'simulate',
         enabled: true,
         dependsOn: ['n-ob-allocate'],
         targetDeviceIds: [st1, st2],
-        simulate: sampleSimulate('cartonize', { cartonizeStrategy: 'by-customer', containerCapacity: 30 }),
-      },
-      {
-        id: 'n-ob-picklist',
-        name: '④ 拣选单生成（按区域合批）',
-        kind: 'simulate',
-        enabled: true,
-        dependsOn: ['n-ob-cartonize'],
-        targetDeviceIds: [st1, st2],
         simulate: sampleSimulate('picklist', { pickListStrategy: 'batch-by-zone' }),
       },
       {
-        id: 'n-ob-down',
-        name: '⑤ 下架（FIFO 最早批次优先）',
+        id: 'n-ob-pick',
+        name: '⑥ 拣选路径（出库工位 → 库位）',
         kind: 'simulate',
         enabled: true,
         dependsOn: ['n-ob-picklist'],
+        sourceDeviceIds: Array.from({ length: 12 }, (_, i) => `d-${sid}-row-${i + 1}`),
+        targetDeviceIds: [st1, st2],
+        simulate: sampleSimulate('pick', { pickStrategy: 's_shape' }),
+      },
+      {
+        id: 'n-ob-down',
+        name: '⑦ 下架（最早批次优先）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-pick'],
         sourceDeviceIds: [st1, st2],
         simulate: sampleSimulate('down', { downStrategy: 'oldest-batch' }),
       },
       {
-        id: 'n-ob-pack',
-        name: '⑥ 打包',
+        id: 'n-ob-cartonize',
+        name: '⑧ 组盘（按客户分托盘）',
         kind: 'simulate',
         enabled: true,
         dependsOn: ['n-ob-down'],
-        targetDeviceIds: [st1],
+        targetDeviceIds: [st1, st2],
+        simulate: sampleSimulate('cartonize', { cartonizeStrategy: 'by-customer', containerCapacity: 30 }),
+      },
+      {
+        id: 'n-ob-pack',
+        name: '⑨ 打包',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-cartonize'],
+        targetDeviceIds: [st1, st2],
         simulate: sampleSimulate('pack'),
       },
       {
-        id: 'n-ob-ship',
-        name: '⑦ 发货（出库交接）',
+        id: 'n-ob-agv',
+        name: '⑩ AGV 配送（托盘 → 4 出库月台）',
         kind: 'simulate',
         enabled: true,
         dependsOn: ['n-ob-pack'],
-        targetDeviceIds: [dock],
+        sourceDeviceIds: [st1, st2, agv],   // 起点：工位 + AGV 调度区
+        targetDeviceIds: docks,             // 终点：4 个月台
+        simulate: sampleSimulate('agv-deliver', { pickStrategy: 's_shape' }),
+      },
+      {
+        id: 'n-ob-ship',
+        name: '⑪ 发货（出库交接）',
+        kind: 'simulate',
+        enabled: true,
+        dependsOn: ['n-ob-agv'],
+        targetDeviceIds: docks,
         simulate: sampleSimulate('ship'),
       },
     ],
@@ -503,6 +639,104 @@ function makeBuiltinTemplates(): DataTemplate[] {
       ],
     },
     {
+      // 出库按库存模板：出库单 SKU 必须从库存 SKU 里挑
+      id: 'tpl-outbound-from-inventory',
+      name: '出库订单 · 按库存生成',
+      description: '出库单按库存 SKU-0001..SKU-0036 显式生成；8 个客户 × 6 单 = 48 行；qty 始终小于库存量',
+      source: 'manual',
+      rowCount: 48,
+      createdAt: t0,
+      updatedAt: t0,
+      fields: [
+        { name: 'orderId',  type: 'string', required: true, prefix: 'OB' },
+        { name: 'sku',      type: 'string', required: true, prefix: 'SKU' },
+        { name: 'qty',      type: 'int',    required: true, min: 2, max: 10 },
+        { name: 'customer', type: 'string', required: true, prefix: 'C' },
+        { name: 'priority', type: 'enum',   required: false, enumValues: ['加急', '常规', '经济'] },
+      ],
+      customRows: (() => {
+        // 8 个客户 × 6 单 = 48 行；SKU 在 1~36 之间循环
+        const customers = ['C001', 'C002', 'C003', 'C004', 'C005', 'C006', 'C007', 'C008'];
+        const priorities: Array<'加急' | '常规' | '经济'> = ['加急', '常规', '经济'];
+        const rows: any[] = [];
+        let obIdx = 1;
+        for (let cIdx = 0; cIdx < customers.length; cIdx++) {
+          for (let sIdx = 0; sIdx < 6; sIdx++) {
+            const skuNum = ((cIdx * 6 + sIdx) % 36) + 1;  // 1..36
+            const qty = 3 + ((cIdx + sIdx) % 7);            // 3..9
+            const pri = priorities[(cIdx + sIdx) % 3];
+            rows.push({
+              orderId: `OB-${String(obIdx).padStart(4, '0')}`,
+              sku: `SKU-${String(skuNum).padStart(4, '0')}`,
+              qty,
+              customer: customers[cIdx],
+              priority: pri,
+            });
+            obIdx++;
+          }
+        }
+        return rows;
+      })(),
+    },
+    {
+      // 用于「初始库存」节点：显式指定要播种的库存行
+      id: 'tpl-inventory-seed',
+      name: '初始库存 · 种子模板',
+      description: '显式构造 36 条库存（3 个 SKU/排 × 12 排）· FIFO 倒序：第 1 行最久远 · 场景 3/5 出库前置',
+      source: 'manual',
+      rowCount: 36,
+      createdAt: t0,
+      updatedAt: t0,
+      fields: [
+        { name: 'sku',    type: 'string', required: true, prefix: 'SKU' },
+        { name: 'qty',    type: 'int',    required: true, min: 30, max: 80 },
+        { name: 'batch',  type: 'string', required: true, prefix: 'B' },
+      ],
+      customRows: (() => {
+        // 12 排 × 3 个 SKU = 36 行；qty 30~80；批次按行号生成（行号越小越久远）
+        const rows: any[] = [];
+        for (let row = 1; row <= 12; row++) {
+          for (let slot = 1; slot <= 3; slot++) {
+            const skuNum = (row - 1) * 3 + slot;  // 1..36
+            const qty = 30 + ((row * 7 + slot * 11) % 50);  // 30~79
+            const batch = `B${String((row - 1) * 3 + slot).padStart(3, '0')}`;
+            rows.push({ sku: `SKU-${String(skuNum).padStart(4, '0')}`, qty, batch });
+          }
+        }
+        return rows;
+      })(),
+    },
+    {
+      // 库存单模板：盘点/调拨/损益/锁定
+      id: 'tpl-inventory-order',
+      name: '库存单 · 模板',
+      description: '盘点/调拨/损益/锁定（type: cycle-count/transfer/adjustment/lock）',
+      source: 'manual',
+      rowCount: 8,
+      createdAt: t0,
+      updatedAt: t0,
+      fields: [
+        { name: 'id',               type: 'string', required: true,  prefix: 'IO' },
+        { name: 'type',             type: 'enum',   required: true,  enumValues: ['cycle-count', 'transfer', 'adjustment', 'lock'] },
+        { name: 'sku',              type: 'string', required: true,  prefix: 'SKU' },
+        { name: 'qty',              type: 'int',    required: true,  min: 1, max: 50 },
+        { name: 'batch',            type: 'string', required: false, prefix: 'B' },
+        { name: 'sourceLocationId', type: 'string', required: false },
+        { name: 'targetLocationId', type: 'string', required: false },
+        { name: 'reason',           type: 'string', required: false },
+      ],
+      customRows: [
+        { id: 'IO-0001', type: 'cycle-count', sku: 'SKU-0001', qty: 20, batch: 'B001', sourceLocationId: 'L00-00', reason: '月度盘点' },
+        { id: 'IO-0002', type: 'cycle-count', sku: 'SKU-0002', qty: 15, batch: 'B002', sourceLocationId: 'L00-04', reason: '月度盘点' },
+        { id: 'IO-0003', type: 'transfer',    sku: 'SKU-0003', qty:  5, batch: 'B003', sourceLocationId: 'L00-08', targetLocationId: 'L00-12', reason: '调拨至高位库位' },
+        { id: 'IO-0004', type: 'transfer',    sku: 'SKU-0005', qty:  8, batch: 'B005', sourceLocationId: 'L01-00', targetLocationId: 'L01-04', reason: '平衡存储' },
+        { id: 'IO-0005', type: 'adjustment',  sku: 'SKU-0006', qty: -2, batch: 'B006', sourceLocationId: 'L01-08', reason: '破损核减' },
+        { id: 'IO-0006', type: 'adjustment',  sku: 'SKU-0008', qty:  3, batch: 'B008', sourceLocationId: 'L02-00', reason: '盘盈入库' },
+        { id: 'IO-0007', type: 'lock',        sku: 'SKU-0010', qty:  1, batch: 'B010', sourceLocationId: 'L02-04', reason: '质量问题锁定' },
+        { id: 'IO-0008', type: 'cycle-count', sku: 'SKU-0011', qty: 11, batch: 'B011', sourceLocationId: 'L02-08', reason: '季度盘点' },
+      ],
+    },
+    {
       id: 'tpl-sku-master',
       name: 'SKU 主数据模板',
       description: '示例：sku / name / category / weight / volume / abcClass',
@@ -541,7 +775,15 @@ const builtinScenarios: Scenario[] = [
   })(),
   (() => {
     const s = makeOutboundScenario('scn-outbound-full');
-    s.stage = makeDoubleDeepStage(s.id);  // 出库场景也用 12 排的舞台
+    s.stage = makeOutboundStage(s.id);  // ✅ 用新的出库舞台（2 出库工位 + 1 AGV + 4 DOCK-OUT）
+    return s;
+  })(),
+  (() => {
+    // 🆕 场景 5：出库全流程（彻底重做版本，绕过旧缓存）
+    const s = makeOutboundScenario('scn-outbound-v2');
+    s.stage = makeOutboundStage(s.id);
+    s.name = '场景 5 · 出库全流程（v2 全新版）';
+    s.description = '新出库舞台（2 出库工位 + 1 AGV + 4 DOCK-OUT）· 11 步全流程 · v20 彻底重做';
     return s;
   })(),
   (() => {
@@ -706,22 +948,59 @@ export const useStore = create<SandboxState>()(
         };
       }),
       duplicateScenario: (id) => set((state) => {
-        const orig = state.scenarios.find((s) => s.id === id);
-        if (!orig) return state;
-        const t = Date.now();
-        const newId = `scn-${t}`;
-        const copy: Scenario = {
-          ...orig,
-          id: newId,
-          name: `${orig.name} 副本`,
-          builtin: false,
-          createdAt: t,
-          updatedAt: t,
-          nodes: orig.nodes.map((n) => ({ ...n, id: `${n.id}-${t}` })),
-        };
-        return { scenarios: [...state.scenarios, copy], currentScenarioId: newId };
-      }),
-
+    const orig = state.scenarios.find((s) => s.id === id);
+    if (!orig) return state;
+    const t = Date.now();
+    const newId = `scn-${t}`;
+    const copy: Scenario = {
+      ...orig,
+      id: newId,
+      name: `${orig.name} 副本`,
+      builtin: false,
+      createdAt: t,
+      updatedAt: t,
+      nodes: orig.nodes.map((n) => ({ ...n, id: `${n.id}-${t}` })),
+    };
+    return { scenarios: [...state.scenarios, copy], currentScenarioId: newId };
+  }),
+  /**
+   * 紧急：从代码强制重建场景的舞台（绕过 migrate 缓存）
+   * - 默认舞台 / 场景 1
+   * - 双深 / 场景 2
+   * - 出库 / 场景 3
+   */
+  resetScenarioStage: (id) => set((state) => {
+    const sc = state.scenarios.find((s) => s.id === id);
+    if (!sc) return state;
+    let newStage: Stage | null = null;
+    if (/场景\s*3|场景\s*5|outbound/i.test(sc.name) || id === 'scn-outbound' || id === 'scn-outbound-v2' || id === 'scn-outbound-full') {
+      newStage = makeOutboundStage(sc.id);
+    } else if (/场景\s*2|双深/i.test(sc.name) || id === 'scn-double-deep') {
+      newStage = makeDoubleDeepStage(sc.id);
+    } else {
+      newStage = makeDefaultStage(sc.id);
+    }
+    return {
+      scenarios: state.scenarios.map((s) => s.id === id ? { ...s, stage: newStage, updatedAt: Date.now() } : s),
+    };
+  }),
+  /**
+   * 🆘 紧急：完全清空 localStorage 并刷新页面
+   * 解决所有版本号/migrate 都没法解决的状态错乱
+   */
+  resetAllData: () => {
+    try { localStorage.removeItem('wms-sandbox-v24'); } catch {}
+    try { localStorage.removeItem('wms-sandbox-v23'); } catch {}
+    try { localStorage.removeItem('wms-sandbox-v22'); } catch {}
+    try { localStorage.removeItem('wms-sandbox-v21'); } catch {}
+    try { localStorage.removeItem('wms-sandbox-v20'); } catch {}
+    try { localStorage.removeItem('wms-sandbox-v19'); } catch {}
+    try { localStorage.removeItem('wms-sandbox-v18'); } catch {}
+    try { localStorage.removeItem('wms-sandbox-v17'); } catch {}
+    try { localStorage.removeItem('wms-sandbox'); } catch {}
+    try { localStorage.clear(); } catch {}
+    location.reload();
+  },
       addNode: (scenarioId, node) => set((state) => ({
         scenarios: state.scenarios.map((s) => s.id === scenarioId ? { ...s, nodes: [...s.nodes, node], updatedAt: Date.now() } : s),
       })),
@@ -931,36 +1210,31 @@ export const useStore = create<SandboxState>()(
       }),
     }),
     {
-      name: 'wms-sandbox-v16',
-      version: 16,
-      // store 升级到 v11：把 shelves 数组迁移到 shelfRow 设备，清掉老结构
+      name: 'wms-sandbox-v24',
+      version: 24,
+      // v22 migrate：
+      // 1) 强制刷新出库场景的舞台（用最新 makeOutboundStage）
+      // 2) 补齐新增的内置场景（持久化只存了旧的内置列表，新加的不会自动出现）
       migrate: (persisted: any, _version: number) => {
         if (!persisted || !Array.isArray(persisted.scenarios)) return persisted;
+        const ids = new Set(persisted.scenarios.map((s: any) => s.id));
+        // 1) 重建出库场景的舞台
         persisted.scenarios = persisted.scenarios.map((sc: any) => {
           if (!sc.stage) return sc;
-          const oldShelves = Array.isArray(sc.stage.shelves) ? sc.stage.shelves : [];
-          const existing = Array.isArray(sc.stage.devices) ? sc.stage.devices : [];
-          // 把 shelves 数组转成 shelfRow 设备（如果还没有）
-          const converted = oldShelves
-            .filter((s: any) => s && typeof s.row === 'number')
-            .map((s: any) => {
-              const id = `d-${sc.id}-row-${s.row}`;
-              if (existing.some((d: any) => d.id === id)) return null;
-              return {
-                id,
-                kind: 'shelfRow',
-                name: s.label ?? `${String.fromCharCode(64 + s.row)} 排`,
-                position: { x: 5, y: 30 + (s.row - 1) * 20 },
-                size: { w: 90, h: 6 },
-                status: 'normal',
-                cellCount: s.cellCount ?? 14,
-                shelfRow: s.row,
-                fields: { rowLabel: s.label ?? `${String.fromCharCode(64 + s.row)} 排` },
-              };
-            })
-            .filter(Boolean);
-          return { ...sc, stage: { ...sc.stage, devices: [...existing, ...converted], shelves: [] } };
+          const isOutboundScn = sc.id === 'scn-outbound' || sc.id === 'scn-outbound-v2' || sc.id === 'scn-outbound-full' || /场景\s*3|场景\s*5/.test(sc.name ?? '');
+          const devs = Array.isArray(sc.stage.devices) ? sc.stage.devices : [];
+          const hasOutboundStage = devs.some((d: any) => d?.kind === 'agv') && devs.filter((d: any) => d?.kind === 'dock').length >= 4;
+          if (isOutboundScn && !hasOutboundStage) {
+            sc.stage = makeOutboundStage(sc.id);
+          }
+          return sc;
         });
+        // 2) 补齐缺失的内置场景（这样 v22 加的「场景 5」才能出现）
+        for (const b of builtinScenarios) {
+          if (!ids.has(b.id)) {
+            persisted.scenarios.push(b);
+          }
+        }
         return persisted;
       },
       partialize: (s) => ({
