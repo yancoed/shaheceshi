@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+    background: #0B0F14;
+    color: #E6EDF3;
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  body {
+    background-image:
+      radial-gradient(1200px 600px at 10% -10%, rgba(244,163,0,0.05), transparent 60%),
+      radial-gradient(800px 400px at 110% 110%, rgba(34,211,164,0.04), transparent 60%),
+      linear-gradient(180deg, #0B0F14 0%, #0A0D11 100%);
+  }
+  /* 微噪点纹理 */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    pointer-events: none;
+    opacity: 0.04;
+    z-index: 0;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.4 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  }
+  ::selection { background: #F4A300; color: #0B0F14; }
+  /* 滚动条 */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #1A2330; border-radius: 0; }
+  ::-webkit-scrollbar-thumb:hover { background: #2A3548; }
+}
+
+@layer components {
+  .panel {
+    @apply bg-bg-panel border border-bg-border shadow-panel;
+  }
+  .panel-raised {
+    @apply bg-bg-raised border border-bg-border;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 px-3 py-2 text-xs font-mono font-medium tracking-wide
+           border transition-colors duration-150 select-none;
+  }
+  .btn-primary {
+    @apply btn bg-accent-amber text-bg-base border-accent-amber hover:bg-accent-amber/90;
+  }
+  .btn-ghost {
+    @apply btn bg-transparent text-ink-primary border-bg-border hover:border-accent-amber/60 hover:text-accent-amber;
+  }
+  .btn-danger {
+    @apply btn bg-transparent text-accent-red border-accent-red/40 hover:bg-accent-red/10;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-mono tracking-wider uppercase
+           border border-bg-border bg-bg-raised text-ink-secondary;
+  }
+  .chip-amber { @apply chip border-accent-amber/40 text-accent-amber bg-accent-amber/5; }
+  .chip-green { @apply chip border-accent-green/40 text-accent-green bg-accent-green/5; }
+  .chip-red   { @apply chip border-accent-red/40 text-accent-red bg-accent-red/5; }
+  .chip-blue  { @apply chip border-accent-blue/40 text-accent-blue bg-accent-blue/5; }
+  .label {
+    @apply text-[10px] font-mono uppercase tracking-[0.18em] text-ink-secondary;
+  }
+  .num {
+    @apply font-mono tabular-nums;
+  }
+  .divider {
+    @apply h-px bg-bg-border w-full;
+  }
+  .scanline::after {
+    content: '';
+    position: absolute; inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      180deg,
+      transparent 0,
+      transparent 2px,
+      rgba(255,255,255,0.012) 3px,
+      transparent 4px
+    );
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.dot-live { animation: pulse-dot 1.4s ease-in-out infinite; }
+
+@keyframes blink { 50% { opacity: 0; } }
+.cursor-blink::after {
+  content: '▍';
+  margin-left: 2px;
+  color: #F4A300;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes count-up {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.count-up { animation: count-up 0.4s ease-out; }
+
+@keyframes path-draw {
+  to { stroke-dashoffset: 0; }
+}
+.path-draw {
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  animation: path-draw 1.4s ease-out forwards;
+}
+
+@keyframes flash-cell {
+  0% { box-shadow: 0 0 0 0 rgba(244,163,0,0.7); }
+  100% { box-shadow: 0 0 0 6px rgba(244,163,0,0); }
+}
+.cell-flash { animation: flash-cell 0.8s ease-out; }
